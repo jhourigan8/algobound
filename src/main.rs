@@ -263,7 +263,6 @@ async fn simulate(lambda: f64) -> f64 {
     let mut dist = Samples { round: 0, data: array::from_fn(|_| Vec::from([0f64])) };
     for _ in 1..ROUND_DEPTH {
         dist = finite_sample_add_layer(dist, lambda).await;
-        println!("some samples are {:?}, {:?}, {:?}", dist.data[0][0], dist.data[0][1], dist.data[0][2]);
     }
     let adv_cdf = precompute_cdf(dist, lambda).await;
     adv_cdf.exp()

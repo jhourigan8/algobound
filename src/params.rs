@@ -19,11 +19,11 @@ pub const EPSILON: f64 = 0.001;
 pub const ETA: f64 = 0.004;
 
 /// The fraction of stake controlled by the adversary.
-pub const ALPHA: f64 = 0.5;
+pub const ALPHA: f64 = 0.3;
 
 /// The fraction of honest stake credential broadcasts which the adversary
 /// is permitted to see before having to decide what to broadcast each round.
-pub const BETA: f64 = 0.4;
+pub const BETA: f64 = 1.0;
 
 /// The number of coins drawn for the adversary assuming their stake is spread
 /// across arbitrarily many accounts.
@@ -34,10 +34,10 @@ pub const SAMPLES_DRAWN: usize = 200_000;
 
 /// The number of rounds simulated before returning the adversary's reward for a
 /// given value of `lambda`.
-pub const ROUND_DEPTH: usize = 30;
+pub const ROUND_DEPTH: usize = 20;
 
 /// The type of bound to be computed.
-pub const MODE: Mode = Mode::LowerBounding;
+pub const MODE: Mode = Mode::UpperBounding;
 
 /// The number of threads spawned for concurrent portions of the code.
 pub const PARALLELISM_FACTOR: usize = 10;
