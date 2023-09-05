@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ApproxFunc","Cdf","Emax","Pdf","Samples","Table"]};
