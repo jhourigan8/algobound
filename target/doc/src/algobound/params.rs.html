@@ -62,11 +62,11 @@
 </span><span class="kw">pub const </span>ETA: f64 = <span class="number">0.004</span>;
 
 <span class="doccomment">/// The fraction of stake controlled by the adversary.
-</span><span class="kw">pub const </span>ALPHA: f64 = <span class="number">0.5</span>;
+</span><span class="kw">pub const </span>ALPHA: f64 = <span class="number">0.3</span>;
 
 <span class="doccomment">/// The fraction of honest stake credential broadcasts which the adversary
 /// is permitted to see before having to decide what to broadcast each round.
-</span><span class="kw">pub const </span>BETA: f64 = <span class="number">0.4</span>;
+</span><span class="kw">pub const </span>BETA: f64 = <span class="number">1.0</span>;
 
 <span class="doccomment">/// The number of coins drawn for the adversary assuming their stake is spread
 /// across arbitrarily many accounts.
@@ -77,10 +77,10 @@
 
 <span class="doccomment">/// The number of rounds simulated before returning the adversary&#39;s reward for a
 /// given value of `lambda`.
-</span><span class="kw">pub const </span>ROUND_DEPTH: usize = <span class="number">30</span>;
+</span><span class="kw">pub const </span>ROUND_DEPTH: usize = <span class="number">20</span>;
 
 <span class="doccomment">/// The type of bound to be computed.
-</span><span class="kw">pub const </span>MODE: Mode = Mode::LowerBounding;
+</span><span class="kw">pub const </span>MODE: Mode = Mode::UpperBounding;
 
 <span class="doccomment">/// The number of threads spawned for concurrent portions of the code.
 </span><span class="kw">pub const </span>PARALLELISM_FACTOR: usize = <span class="number">10</span>;</code></pre></div></section></main></body></html>

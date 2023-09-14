@@ -43,6 +43,7 @@ impl<T: std::fmt::Debug> ApproxFunc<T> {
             x = self.min;
         }
         let step = (self.max - self.min) / self.buckets as f64;
+        // Always round bucket down.
         let mut bucket = ((x - self.min) / step).floor() as usize;
         if bucket == self.buckets { bucket -= 1; }
         bucket
@@ -62,6 +63,11 @@ impl<T: std::fmt::Debug> ApproxFunc<T> {
     /// Get a reference to the value `x` is mapped to.
     pub fn get(&self, x: f64) -> &T {
         &self.vals[self.idx(x)]
+    }
+
+    /// Get a reference to the bucket following `x`.
+    pub fn get_next(&self, x: f64) -> &T {
+        &self.vals[self.idx(x) + 1]
     }
 }
 
@@ -226,7 +232,14 @@ pub struct Emax {
 impl Emax {
     /// Get a reference to the value `x` is mapped to.
     pub fn get(&self, x: f64) -> &f64 {
-        self.f.get(x)
+        // Check endpoint values in containing interval and return smallest / largest depending on mode.
+        let mut ret = &f64::MIN;
+        for val in [self.f.get(x), self.f.get_next(x)] {
+            if val < ret {
+                ret = val;
+            }
+        }
+        ret
     }
 
     /// Compute a table given this emax.
@@ -305,6 +318,15 @@ pub struct Table {
 impl Table {
     /// Get a reference to the value (`theta`, `gamma`) is mapped to.
     pub fn get(&self, theta: f64, gamma: f64) -> &f64 {
-        self.f.get(gamma).get(theta)
+        // Check all values in containing grid and return smallest / largest depending on mode.
+        let mut ret = &f64::MIN;
+        for partial in [self.f.get(gamma), self.f.get_next(gamma)] {
+            for val in [partial.get(theta), partial.get_next(theta)] {
+                if val < ret {
+                    ret = val;
+                }
+            }
+        }
+        ret
     }
 }
