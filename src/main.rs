@@ -94,17 +94,22 @@ fn draw_adv(advdist: &Cdf) -> AdvDraw {
 
 /// The precomputed data.
 enum Precomp {
+    /// Data needed if `BETA == 0`.
+    None(Cdf, f64),
     /// Data needed if `BETA == 1`.
     Short(Cdf, Emax, f64),
-    /// Data needed if `BETA < 0.5`.
-    Direct(Cdf, Table, f64, f64, f64),
-    /// Data needed if `0.5 <= BETA < 1`.
-    Transformed(Cdf, Table, f64)
+    /// Data needed if `0 < BETA < 1`.
+    Long(Cdf, Table, f64)
 }
 
 /// Given precomputed data `precomp` sample a single new adversary reward.
 fn sample(precomp: Arc<Precomp>) -> f64 {
     match &*precomp {
+        Precomp::None(cdf, lambda) => {
+            let adv = draw_adv(&cdf);
+            let best = adv.best_from(ADV_COINS);
+            best - lambda
+        }
         Precomp::Short(cdf, emax, lambda) => {
             let adv = draw_adv(&cdf);
             let mut cum = 0f64;
@@ -115,53 +120,16 @@ fn sample(precomp: Arc<Precomp>) -> f64 {
                     AdvDraw::beat_honest_prob(adv.coins[i_star + 1])
                 );
             }
+            // println!("scored {}", cum);
             cum - lambda
         },
-        Precomp::Direct(cdf, table, lambda, exp, max_c) => {
+        Precomp::Long(cdf, table, lambda) => {
             let adv = draw_adv(&cdf);
             let mut cum = 0f64;
             for i_star in 1..=ADV_COINS {
                 let best = adv.best_from(i_star);
-                if adv.coins[i_star + 1] <= *max_c {
-                    cum -= table.get(adv.coins[i_star], best);
-                    cum += table.get(adv.coins[i_star + 1], best);
-                } else if *max_c <= adv.coins[i_star] {
-                    if best >= 0f64 {
-                        cum += best * (
-                            AdvDraw::beat_seen_honest_prob(adv.coins[i_star]) -
-                            AdvDraw::beat_seen_honest_prob(adv.coins[i_star + 1])
-                        );
-                    } else {
-                        cum += BETA * *exp * (
-                            AdvDraw::beat_honest_prob(adv.coins[i_star]) -
-                            AdvDraw::beat_honest_prob(adv.coins[i_star + 1])
-                        );
-                    }
-                } else {
-                    cum -= table.get(adv.coins[i_star], best);
-                    cum += table.get(*max_c, best);
-                    if best >= 0f64 {
-                        cum += best * (
-                            AdvDraw::beat_seen_honest_prob(*max_c) -
-                            AdvDraw::beat_seen_honest_prob(adv.coins[i_star + 1])
-                        );
-                    } else {
-                        cum += BETA * *exp * (
-                            AdvDraw::beat_honest_prob(*max_c) -
-                            AdvDraw::beat_honest_prob(adv.coins[i_star + 1])
-                        );
-                    }
-                }
-            }
-            cum - lambda
-        },
-        Precomp::Transformed(cdf, table, lambda) => {
-            let adv = draw_adv(&cdf);
-            let mut cum = 0f64;
-            for i_star in 1..=ADV_COINS {
-                let best = adv.best_from(i_star);
-                cum -= table.get(AdvDraw::beat_unseen_honest_prob(adv.coins[i_star]), best);
-                cum += table.get(AdvDraw::beat_unseen_honest_prob(adv.coins[i_star + 1]), best);
+                cum -= table.get(adv.coins[i_star], best);
+                cum += table.get(adv.coins[i_star + 1], best);
             }
             cum - lambda
         }
@@ -182,21 +150,18 @@ async fn precompute_cdf(samp: Samples, lambda: f64) -> Cdf {
 async fn precompute(samp: Samples, lambda: f64) -> Precomp {
     let round = samp.round;
     let adv_cdf = precompute_cdf(samp, lambda).await;
+    println!("round {:#?} expected win {:#?}", round, adv_cdf.exp());
+    if BETA == 0f64 {
+        return Precomp::None(adv_cdf, lambda);
+    }
     // 1c and 1d: compute E_max thetas
     let emax = adv_cdf.to_emax();
-    println!("round {:#?} expected win {:#?}", round, adv_cdf.exp());
     if BETA == 1f64 {
         return Precomp::Short(adv_cdf, emax, lambda);
     }
     // 1e: compute G(gamma, c)
     let table = emax.to_table(round + 1, lambda).await;
-    if BETA < 0.5f64 {
-        let exp = adv_cdf.exp();
-        let max_c = (round as f64 * (1f64 - lambda) / EPSILON).ln() / ((1f64 - BETA) * (1f64 - ALPHA));
-        Precomp::Direct(adv_cdf, table, lambda, exp, max_c)
-    } else {
-        Precomp::Transformed(adv_cdf, table, lambda)
-    }
+    Precomp::Long(adv_cdf, table, lambda)
 }
 
 /// Helper to compute new samples.

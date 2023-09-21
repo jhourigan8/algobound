@@ -67,7 +67,7 @@ impl<T: std::fmt::Debug> ApproxFunc<T> {
 
     /// Get a reference to the bucket following `x`.
     pub fn get_next(&self, x: f64) -> &T {
-        &self.vals[self.idx(x) + 1]
+        &self.vals[(self.idx(x) + 1).min(self.buckets - 1)]
     }
 }
 
@@ -214,7 +214,7 @@ impl Cdf {
             let mid = (lo + hi) / 2;
             if self.f.vals[mid] <= ptile { lo = mid } else { hi = mid };
         }
-        // this is only used to sample adversary rewards so just round down/up (TODO check thiss)
+        // this is only used to sample adversary rewards so just round down/up (TODO also used for bounding ptile)
         let buck = match MODE {
             Mode::LowerBounding => lo,
             Mode::UpperBounding => hi
@@ -233,10 +233,14 @@ impl Emax {
     /// Get a reference to the value `x` is mapped to.
     pub fn get(&self, x: f64) -> &f64 {
         // Check endpoint values in containing interval and return smallest / largest depending on mode.
-        let mut ret = &f64::MIN;
+        let mut ret = match MODE { 
+            Mode::LowerBounding => &f64::MAX,
+            Mode::UpperBounding => &f64::MIN
+        };
         for val in [self.f.get(x), self.f.get_next(x)] {
-            if val < ret {
-                ret = val;
+            match MODE {
+                Mode::LowerBounding => if val < ret { ret = val },
+                Mode::UpperBounding => if val > ret { ret = val }
             }
         }
         ret
@@ -276,20 +280,11 @@ impl Emax {
     ) -> ApproxFunc<f64> {
         let direct = BETA < 0.5f64;
         let mut cum = 0f64;
-        let coeff = if direct {
-            ETA * BETA * (1f64 - ALPHA)
-        } else {
-            ETA * BETA / (1f64 - BETA)
-        };
-        let max = if direct {
-            (round as f64 * (1f64 - lambda) / EPSILON).ln() / ((1f64 - BETA) * (1f64 - ALPHA))
-        } else {
-            1f64
-        };
         let mut vec = Vec::default();
-        let mut theta = 0f64 + ETA * 0.5;
-        while theta < max {
-            let bcast_score = gamma / if direct { AdvDraw::beat_unseen_honest_prob(theta) } else { theta };
+        let mut theta = 0f64;
+        while theta < 1f64 {
+            let pow_theta = theta.powf((1f64 - BETA) / BETA);
+            let bcast_score = gamma / pow_theta;
             let emax_score = if bcast_score > f.max {
                 &bcast_score
             } else if bcast_score < f.min {
@@ -297,7 +292,7 @@ impl Emax {
             } else {
                 f.get(bcast_score)
             };
-            cum += coeff * *emax_score * if direct { AdvDraw::beat_honest_prob(theta) } else { 1f64 };
+            cum += ETA * *emax_score * pow_theta;
             vec.push(cum);
             theta += ETA;
         }
@@ -319,11 +314,15 @@ impl Table {
     /// Get a reference to the value (`theta`, `gamma`) is mapped to.
     pub fn get(&self, theta: f64, gamma: f64) -> &f64 {
         // Check all values in containing grid and return smallest / largest depending on mode.
-        let mut ret = &f64::MIN;
+        let mut ret = match MODE { 
+            Mode::LowerBounding => &f64::MAX,
+            Mode::UpperBounding => &f64::MIN
+        };
         for partial in [self.f.get(gamma), self.f.get_next(gamma)] {
             for val in [partial.get(theta), partial.get_next(theta)] {
-                if val < ret {
-                    ret = val;
+                match MODE {
+                    Mode::LowerBounding => if val < ret { ret = val },
+                    Mode::UpperBounding => if val > ret { ret = val }
                 }
             }
         }

@@ -30,7 +30,7 @@ pub const BETA: f64 = 1.0;
 pub const ADV_COINS: usize = 20;
 
 /// The number of samples drawn to compute the reward distribution on each round.
-pub const SAMPLES_DRAWN: usize = 200_000;
+pub const SAMPLES_DRAWN: usize = 20_000;
 
 /// The number of rounds simulated before returning the adversary's reward for a
 /// given value of `lambda`.
