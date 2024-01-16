@@ -1,10 +1,23 @@
+use std::ops::Not;
+
 /// An enum specifying if the current simulation is to yield
 /// a lower bound or an upper bound to the true `lambda`.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
-pub enum Mode {
-    LowerBounding,
-    UpperBounding
+pub enum Rounding {
+    Down,
+    Up
+}
+
+impl Not for Rounding {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Rounding::Down => Rounding::Up,
+            Rounding::Up => Rounding::Down
+        }
+    }
 }
 
 /// Upper bound on the probability that a single `inflate` / `deflate` 
@@ -37,7 +50,7 @@ pub const SAMPLES_DRAWN: usize = 20_000;
 pub const ROUND_DEPTH: usize = 20;
 
 /// The type of bound to be computed.
-pub const MODE: Mode = Mode::UpperBounding;
+pub const MODE: Rounding = Rounding::Up;
 
 /// The number of threads spawned for concurrent portions of the code.
-pub const PARALLELISM_FACTOR: usize = 10;
+pub const PARALLELISM_FACTOR: usize = 1;
