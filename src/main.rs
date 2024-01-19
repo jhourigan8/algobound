@@ -1,5 +1,4 @@
 mod precomp;
-mod params;
 
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -7,8 +6,29 @@ use rand::Rng;
 use core::array;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
+use std::ops::Not;
 
-use crate::{precomp::*, params::*};
+use crate::precomp::*;
+
+/// An enum specifying if the current simulation is to yield
+/// a lower bound or an upper bound to the true `lambda`.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub enum Rounding {
+    Down,
+    Up
+}
+
+impl Not for Rounding {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Rounding::Down => Rounding::Up,
+            Rounding::Up => Rounding::Down
+        }
+    }
+}
 
 /// An exponential distribution with parameter `a`.
 struct ExpoDist {
@@ -153,10 +173,8 @@ async fn precompute_cdf(samp: Samples, epsilon: f64, lambda: f64, rounding: Roun
 
 /// Given samples `samp` and `lambda` precompute the requisite data for efficient sampling.
 async fn precompute(
-    samp: Samples, epsilon: f64, eta: f64, alpha: f64, beta: f64, lambda: f64, rounding: Rounding
+    adv_cdf: Cdf, eta: f64, beta: f64, rounding: Rounding
 ) -> Precomp {
-    let round = samp.round;
-    let adv_cdf = precompute_cdf(samp, epsilon, lambda, rounding.clone()).await;
     // println!("round {:#?} expected win {:#?}", round, adv_cdf.exp());
     if beta == 0.0 {
         return Precomp::None(adv_cdf);
@@ -174,15 +192,30 @@ async fn precompute(
 /// A struct to carry around needed parameters.
 #[derive(Clone, Copy)]
 struct Parameters {
+    /// The number of coins drawn for the adversary assuming their stake is spread
+    /// across arbitrarily many accounts.
     adv_coins: usize,
+    /// Discretization interval size for all functions of the adversary's rewards.
+    /// Namely, used in `Pdf`, `Cdf`, `Emax`, and the second argument to `Table`.
     epsilon: f64,
+    /// Discretization interval size for the first argument to `Table`.
     eta: f64,
+    /// The fraction of stake controlled by the adversary.
     alpha: f64,
+    /// The fraction of honest stake credential broadcasts which the adversary
+    /// is permitted to see before having to decide what to broadcast each round.
     beta: f64,
+    /// The type of bound to be computed.
     rounding: Rounding,
-    samples_drawn: usize, 
+    /// The number of samples drawn to compute the reward distribution on each round.
+    samples_drawn: usize,
+    /// The number of independent tasks we split any parallel work into.
     parallelism_factor: usize,
+    /// The number of rounds simulated before returning the adversary's reward for a
+    /// given value of `lambda`.
     round_depth: usize,
+    /// Upper bound on the probability that a single `inflate` / `deflate` 
+    /// procedure fails to produce a stochastic upper / lower bound.
     chernoff_error: f64
 }
 
@@ -204,16 +237,18 @@ async fn finite_sample_add_layer(samp: Samples, params: &Parameters, lambda: f64
     }
     let mut new_samps = Samples { round: samp.round + 1, data };
     let mut handles = Vec::with_capacity(params.parallelism_factor);
-    let precomp = Arc::new(precompute(samp, params.epsilon, params.eta, params.alpha, params.beta, lambda, params.rounding).await);
+    let adv_cdf = precompute_cdf(samp, params.epsilon, lambda, params.rounding).await;
+    let precomp = Arc::new(precompute(adv_cdf.clone(), params.eta, params.beta, params.rounding).await);
     for _ in 0..params.parallelism_factor {
         handles.push(tokio::spawn(add_layer_helper(precomp.clone(), params.clone(), lambda)));
     }
     for (i, handle) in handles.into_iter().enumerate() {
         new_samps.data[i] = handle.await.unwrap();
     }
-    fooflate(new_samps, params, lambda).await
+    fooflate(new_samps.clone(), adv_cdf, params, lambda).await
 }
 
+/*
 /// Inflate or deflate `samp` depending on the mode of the simulation.
 async fn fooflate(samp: Samples, params: &Parameters, lambda: f64) -> Samples {
     let shift_percent = ((1.0 / params.chernoff_error).ln() / (2 * params.samples_drawn) as f64).sqrt() as f64;
@@ -298,6 +333,49 @@ async fn fooflate(samp: Samples, params: &Parameters, lambda: f64) -> Samples {
         data.push(vec);
         count += count_partial;
     }
+    // println!("round {:?} some samps {:?}", samp.round, &data[0][0..10]);
+    Samples { round: samp.round, data }
+}
+*/
+
+/// Experimental.
+async fn fooflate(samp: Samples, old_cdf: Cdf, params: &Parameters, lambda: f64) -> Samples {
+    let shift_percent = ((1.0 / params.chernoff_error).ln() / (2 * params.samples_drawn) as f64).sqrt() as f64;
+    let rounding = params.rounding;
+    let num_flate = (shift_percent * params.samples_drawn as f64).ceil() as usize;
+    // inflating
+    // beta = 1 is the most adversarial case, let's assume that
+    // (beta = 1 can simulate any other value of beta anyway)
+    // each coin in ranked order is alpha prob adv, 1 - alpha prob honest 
+    // so coin k is in play with probability alpha^k
+    // suppose F is cdf from last round, G is next round
+    // then 1 - G(x) <= alpha/(1-alpha)(1 - F(x+lambda-1)) + alpha(1 - F(x+lambda))
+    // assumes x > -lambda
+    // deflating 
+    // loosely, can take beta = 1 and assume adversary picks coins to lose as much as possible
+    // then G(x) <= alpha/(1-alpha)F(x+lambda-1) + alpha F(x+lambda)
+    // assumes x < -lambda
+    let flated = old_cdf.flate(params.alpha, num_flate, params.samples_drawn, lambda, &params.rounding);
+    let mut vec = Vec::default();
+    for mini in samp.data {
+        vec.extend(mini);
+    }
+    match rounding {
+        Rounding::Down => vec.sort_by(|a, b| b.partial_cmp(a).unwrap()),
+        Rounding::Up => vec.sort_by(|a, b| a.partial_cmp(b).unwrap()),
+    }
+    // println!("flate {:?} of {:?}", num_flate, params.samples_drawn);
+    for i in 0..num_flate {
+        vec[i] = flated[i];
+    }
+    let mut data = Vec::default();
+    for i in 0..params.parallelism_factor {
+        data.push(Vec::new());
+        for j in 0..params.samples_drawn / params.parallelism_factor {
+            data[i].push(vec[i * (params.samples_drawn / params.parallelism_factor) + j]);
+        }
+    }
+    // println!("round {:?} some samps {:?} old exp {:?}", samp.round, &data[0][0..10], old_cdf.exp());
     Samples { round: samp.round, data }
 }
 
@@ -308,28 +386,36 @@ async fn simulate(params: &Parameters, lambda: f64) -> f64 {
         data.push(Vec::from([0.0]));
     }
     let mut dist = Samples { round: 1, data };
-    for i in 1..params.round_depth {
-        // println!("round {:?} at {:?}", i, SystemTime::now());
+    for i in 0..params.round_depth {
+        println!("round {:?} at {:?}", i, SystemTime::now());
         dist = finite_sample_add_layer(dist, params, lambda).await;
     }
     let adv_cdf = precompute_cdf(dist, params.epsilon, lambda, params.rounding).await;
     adv_cdf.exp()
 }
 
-/// TODO: desc
-async fn binary_search(params: &Parameters) -> f64 {
+/// Search for the value of `lambda` which yields zero expected adversary reward.
+async fn search(params: &Parameters) -> f64 {
+    let target = params.epsilon + params.eta + 2.0 / (params.samples_drawn as f64).sqrt();
+    println!("target {:?}", target);
     let mut lo = params.alpha;
     let mut lo_reward = simulate(&params, lo).await;
-    let mut hi = 1.0;
-    let mut hi_reward = lo_reward + -1.0 * (hi - lo);
+    let mut hi = params.alpha + params.alpha * params.alpha; // empirically always an upper bound
+    let mut hi_reward = simulate(&params, hi).await;
     // println!("init lo re = {:?}, hi re = {:?}, time = {:?}", lo_reward, hi_reward, SystemTime::now());
     loop {
-        let mut lambda = lo + (hi - lo) * (lo_reward / (lo_reward - hi_reward));
+        let mut lambda = match params.rounding {
+            Rounding::Down => lo + (hi - lo) * ((lo_reward - target) / (lo_reward - hi_reward)),
+            Rounding::Up => lo + (hi - lo) * ((lo_reward + target) / (lo_reward - hi_reward))
+        };
         lambda = lambda.max(0.0).min(1.0);
-        // println!("lo {:?} re {:?}, hi {:?} re {:?}, lambda {:?}", lo, lo_reward, hi, hi_reward, lambda);
+        println!("lo {:?} re {:?}, hi {:?} re {:?}, lambda {:?}", lo, lo_reward, hi, hi_reward, lambda);
         let reward = simulate(&params, lambda).await;
-        // println!("lambda = {:?}, reward = {:?}, time = {:?}", lambda, reward, SystemTime::now());
-        if reward.abs() < 0.001 { return lambda; }
+        println!("lambda = {:?}, reward = {:?}, time = {:?}", lambda, reward, SystemTime::now());
+        match params.rounding {
+            Rounding::Down => if reward > 0.0 && reward < 2.0 * target { return lambda; },
+            Rounding::Up => if reward < 0.0 && reward > -2.0 * target { return lambda; }
+        }
         if reward > 0.0 {
             lo = lambda;
             lo_reward = reward;
@@ -349,38 +435,53 @@ struct SimResult {
     upper_bound: f64
 }
 
+async fn compute_interval(
+    alpha: f64, beta: f64, epsilon: f64, eta: f64, chernoff_error: f64,
+    adv_coins: usize, round_depth: usize, samples_drawn: usize, parallelism_factor: usize
+) -> SimResult {
+    let mut lower_bound = 0.0;
+    let mut upper_bound = 0.0;
+    for rounding in [Rounding::Down, Rounding::Up] {
+        // println!("{:?} {:?} {:?} at {:?}", rounding, alpha, beta, SystemTime::now());
+        let params = Parameters {
+            adv_coins,
+            epsilon,
+            eta,
+            alpha,
+            beta,
+            rounding,
+            samples_drawn, 
+            parallelism_factor,
+            round_depth,
+            chernoff_error
+        };
+        let lambda = search(&params).await;
+        match rounding {
+            Rounding::Down => lower_bound = lambda,
+            Rounding::Up => upper_bound = lambda
+        };
+    }
+    let res = SimResult { alpha, beta, lower_bound, upper_bound };
+    println!("res {:?}", res);
+    res
+}
+
 #[tokio::main]
 async fn main() {
-    let mut results = Vec::default();
-    for beta in [0.0, 0.5, 1.0] {
-        for alpha in [0.25, 0.375, 0.5] {
-            let mut lower_bound = 0.0;
-            let mut upper_bound = 0.0;
-            for rounding in [Rounding::Down, Rounding::Up] {
-                println!("{:?} {:?} {:?} at {:?}", rounding, alpha, beta, SystemTime::now());
-                let params = Parameters {
-                    adv_coins: 10,
-                    epsilon: 0.001,
-                    eta: 0.0001,
-                    alpha,
-                    beta,
-                    rounding,
-                    samples_drawn: 10_000_000, 
-                    parallelism_factor: 100,
-                    round_depth: 20,
-                    chernoff_error: 0.0005
-                };
-                let lambda = binary_search(&params).await;
-                match rounding {
-                    Rounding::Down => lower_bound = lambda,
-                    Rounding::Up => upper_bound = lambda
-                };
-            }
-            results.push( SimResult { alpha, beta, lower_bound, upper_bound });
-            println!("{:?} at {:?}", SimResult { alpha, beta, lower_bound, upper_bound }, SystemTime::now());
-        }
-    }
-    println!("{:?}", results);
+    compute_interval(0.25, 0.0, 0.000005, 0.0, 0.0005, 10, 10, 5_000_000, 100).await;
+    // old: res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.2489775838399409, upper_bound: 0.26128399869948304 }
+    // new: res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.25038047955192605, upper_bound: 0.2567438809667857 }
+    /*
+    let start = Instant::now();
+    let res = compute_interval(0.25, 0.0, 0.0000001, 0.0, 0.0005, 10, 10, 50_000_000, 100).await;
+    println!("beta 0.0 {:?} width {:?}", start.elapsed(), res.upper_bound - res.lower_bound);
+    let start = Instant::now();
+    let res = compute_interval(0.25, 0.5, 0.00005, 0.00005, 0.0005, 10, 10, 50_000_000, 100).await;
+    println!("beta 0.5 {:?} width {:?}", start.elapsed(), res.upper_bound - res.lower_bound);
+    let start = Instant::now();
+    let res = compute_interval(0.25, 1.0, 0.0000001, 0.0, 0.0005, 10, 10, 50_000_000, 100).await;
+    println!("beta 1.0 {:?} width {:?}", start.elapsed(), res.upper_bound - res.lower_bound);
+    */
 }
 
 mod tests {
@@ -412,8 +513,9 @@ mod tests {
         let dist = ExpoDist::new(2.0);
         let mut sum = 0.0;
         let mut passed = 0;
+        let mut rng = rand::rngs::SmallRng::from_entropy();
         for _ in 0..10_000 {
-            let y = dist.sample();
+            let y = dist.sample(&mut rng);
             sum += y;
             if y > 1.0 { passed += 1; }
         }
@@ -433,9 +535,10 @@ mod tests {
     async fn adv_draw() {
         let uniform = uniform_dist().await.to_cdf();
         let mut tot = 0.0;
+        let mut rng = rand::rngs::SmallRng::from_entropy();
         for _ in 0..10_000 {
             // 9 coins, 0.5 expo param, uni 0-1 rewards each time
-            let advdraw = draw_adv(&uniform, 9, 0.5);
+            let advdraw = draw_adv(&uniform, 9, 0.5, &mut rng);
             // beta = 1, 10 coins beat public => all guaranteed to win
             // EV is one plus max of 9 uniforms = 1.9
             tot += advdraw.best_from(9, 0.5, 1.0);
@@ -470,12 +573,6 @@ mod tests {
         assert_approx_eq(&e.powf(-3.0 * 0.15), &AdvDraw::beat_seen_honest_prob(3.0, 0.5, 0.3));
         // either: 50% mass
         assert_approx_eq(&e.powf(-3.0 * 0.50), &AdvDraw::beat_honest_prob(3.0, 0.5));
-    }
-
-    #[tokio::test]
-    async fn sample() {
-        // lower 0.2628173828125, upper 0.2635498046875
-        // todo: overleaf functions, finish tests, overleaf tests, benchmark 10^8, some trial simulations
     }
 
     #[tokio::test]

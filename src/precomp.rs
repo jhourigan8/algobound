@@ -1,7 +1,8 @@
 use rand::Rng;
 use std::{mem, sync::Arc};
-use crate::{params::*};
+use crate::Rounding;
 use rand::rngs::SmallRng;
+use rand::SeedableRng;
 
 /// A struct defining a function from [`min`, `max`] to T.
 /// The domain is discretized into `buckets` equally sized buckets.
@@ -21,7 +22,7 @@ impl<T: Clone + Default> ApproxFunc<T> {
     /// Construct a new `ApproxFunc<T>` with discretization error at most `error`.
     /// Values are initially `T::default()`.
     pub fn new(min: f64, max: f64, error: f64) -> Self {
-        let mut buckets = ((max - min) / error).ceil() as usize;
+        let buckets = ((max - min) / error).ceil() as usize;
         let new_max = min + buckets as f64 * error;
         let vals = vec![T::default(); buckets + 1];
         Self {
@@ -160,6 +161,54 @@ pub struct Cdf {
 }
 
 impl Cdf {
+    /// TODO desc
+    pub fn flate(&mut self, alpha: f64, num_flate: usize, samples_drawn: usize, lambda: f64, rounding: &Rounding) -> Vec<f64> {
+        let mut flated = Vec::default();
+        match rounding {
+            Rounding::Up => {
+                let mut x = self.f.max + 1.0 - lambda;
+                loop {
+                    let mut mass = alpha / (1.0 - alpha) * (1.0 - self.f.get(x + lambda - 1.0, &Rounding::Down));
+                    if x + lambda <= self.f.max {
+                        mass += alpha * (1.0 - self.f.get(x + lambda, &Rounding::Down));
+                    }
+                    if x <= -lambda {
+                        mass += 1 - alpha
+                    }
+                    let target = (mass * samples_drawn as f64).ceil() as usize;
+                    while flated.len() < target {
+                        flated.push(x);
+                        if flated.len() == num_flate {
+                            return flated;
+                        }
+                    }
+                    x -= self.f.error;
+                }
+            },
+            Rounding::Down => {
+                let mut x = self.f.min - lambda;
+                loop {
+                    let mut mass = alpha * self.f.get(x + lambda, &Rounding::Up);
+                    if x + lambda - 1.0 >= self.f.min {
+                        mass += alpha / (1.0 - alpha) * self.f.get(x + lambda - 1.0, &Rounding::Up);
+                    }
+                    if x >= -lambda {
+                        mass += 1 - alpha
+                    }
+                    let target = (mass * samples_drawn as f64).ceil() as usize;
+                    // println!("x {:?} mass {:?} target {:?}", x, mass, target);
+                    while flated.len() < target {
+                        flated.push(x);
+                        if flated.len() == num_flate {
+                            return flated;
+                        }
+                    }
+                    x += self.f.error;
+                }
+            }
+        }
+    }
+
     /// Compute the expectation of a random variable drawn according to this cdf.
     pub fn exp(&self) -> f64 {
         let min = self.f.min;
@@ -458,9 +507,10 @@ pub mod tests {
         // Rounded down => hits 0.5 at 0.99
         assert_approx_eq(&cdf.inv_get(0.5000), &0.99);
         // Brief check sample works. Variance of 250k samples < 0.002
+        let mut rng = rand::rngs::SmallRng::from_entropy();
         let mut sum = 0.0;
         for _ in 0..250_000 {
-            sum += cdf.sample();
+            sum += cdf.sample(&mut rng);
         }
         let avg = sum / 250_000.0;
         assert!(avg - 0.995 < 0.006);
@@ -502,14 +552,13 @@ pub mod tests {
         // table with beta = 0.5 => exponent is 1, integrand is zeta * Emax(gamma / zeta)
         let table = emax.to_table(0.01, 0.5, Rounding::Down).await;
         // fix gamma = 1. then while zeta <= 0.5, this is just gamma
-        // so if zeta = 0.5 should get 0.5  back whether rounding up or down
-        assert_approx_eq(&table.get(0.50, 1.0, &Rounding::Down), &0.50);
+        // so diff between zeta = 0.0 and zeta = 0.5 should be 0.5
+        assert_approx_eq(&(table.get(0.0, 1.0, &Rounding::Up) - table.get(0.50, 1.0, &Rounding::Up)), &0.50);
         // now, from 0.5 to 1.0 it's integrating zeta * (1 + 1/4zeta^2)
         // lower bounding => picks lower zeta each time
         // wolfram alpha gives .547043044. we should get something slightly below this 
         // due to rounded down emax gets. let's check:
-        assert!(table.get(1.0, 1.0, &Rounding::Down) < &(0.50 + 0.547043044));
-        assert!(table.get(1.0, 1.0, &Rounding::Down) > &(0.50 + 0.547043044 - 0.01));
-        // todo: do more
+        assert!(table.get(-0.00001, 1.0, &Rounding::Down) < &(0.50 + 0.547043044));
+        assert!(table.get(-0.00001, 1.0, &Rounding::Down) > &(0.50 + 0.547043044 - 0.01));
     }
 }
