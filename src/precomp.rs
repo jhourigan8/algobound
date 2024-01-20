@@ -92,35 +92,18 @@ pub struct Samples {
     /// The round on which the samples were collected.
     pub round: usize,
     /// The samples.
-    pub data: Vec<Vec<f64>>
+    pub data: Vec<f64>
 }
 
 impl Samples {
     /// Given a collection of samples, construct an equivalent discretized pdf
     /// with domain [`min`, `max`] and error `error`.
-    pub async fn to_pdf(self, min: f64, max: f64, error: f64, rounding: Rounding) -> Pdf {
+    pub fn to_pdf(self, min: f64, max: f64, error: f64, rounding: Rounding) -> Pdf {
         let mut pdf = Pdf {
             f: ApproxFunc::<f64>::new(min, max, error)
         };
-        let mut handles = Vec::with_capacity(self.data.len());
-        let len = self.data.len();
-        for vec in self.data {
-            handles.push(tokio::spawn(Self::to_pdf_helper(min, max, vec, error, rounding.clone())));
-        }
-        for handle in handles {
-            pdf.f.add(&handle.await.unwrap().f)
-        }
-        pdf.f.mul_const(1f64 / len as f64);
-        pdf
-    }
-
-    /// Helper processes a single batch of samples to produce a partial pdf.
-    async fn to_pdf_helper(min: f64, max: f64, samples: Vec<f64>, error: f64, rounding: Rounding) -> Pdf {
-        let mut pdf = Pdf {
-            f: ApproxFunc::<f64>::new(min, max, error)
-        };
-        let delta = 1f64 / samples.len() as f64;
-        for sample in samples {
+        let delta = 1f64 / self.data.len() as f64;
+        for sample in self.data {
             // Lower tick on LB, upper tick on UB
             *pdf.f.get_mut(sample, &rounding) += delta;
         }
@@ -161,54 +144,6 @@ pub struct Cdf {
 }
 
 impl Cdf {
-    /// TODO desc
-    pub fn flate(&mut self, alpha: f64, num_flate: usize, samples_drawn: usize, lambda: f64, rounding: &Rounding) -> Vec<f64> {
-        let mut flated = Vec::default();
-        match rounding {
-            Rounding::Up => {
-                let mut x = self.f.max + 1.0 - lambda;
-                loop {
-                    let mut mass = alpha / (1.0 - alpha) * (1.0 - self.f.get(x + lambda - 1.0, &Rounding::Down));
-                    if x + lambda <= self.f.max {
-                        mass += alpha * (1.0 - self.f.get(x + lambda, &Rounding::Down));
-                    }
-                    if x <= -lambda {
-                        mass += 1 - alpha
-                    }
-                    let target = (mass * samples_drawn as f64).ceil() as usize;
-                    while flated.len() < target {
-                        flated.push(x);
-                        if flated.len() == num_flate {
-                            return flated;
-                        }
-                    }
-                    x -= self.f.error;
-                }
-            },
-            Rounding::Down => {
-                let mut x = self.f.min - lambda;
-                loop {
-                    let mut mass = alpha * self.f.get(x + lambda, &Rounding::Up);
-                    if x + lambda - 1.0 >= self.f.min {
-                        mass += alpha / (1.0 - alpha) * self.f.get(x + lambda - 1.0, &Rounding::Up);
-                    }
-                    if x >= -lambda {
-                        mass += 1 - alpha
-                    }
-                    let target = (mass * samples_drawn as f64).ceil() as usize;
-                    // println!("x {:?} mass {:?} target {:?}", x, mass, target);
-                    while flated.len() < target {
-                        flated.push(x);
-                        if flated.len() == num_flate {
-                            return flated;
-                        }
-                    }
-                    x += self.f.error;
-                }
-            }
-        }
-    }
-
     /// Compute the expectation of a random variable drawn according to this cdf.
     pub fn exp(&self) -> f64 {
         let min = self.f.min;

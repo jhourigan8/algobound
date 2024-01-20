@@ -165,7 +165,7 @@ fn sample(
 async fn precompute_cdf(samp: Samples, epsilon: f64, lambda: f64, rounding: Rounding) -> Cdf {
     // 1a: compute adversary pdf
     let (min, max) = (samp.round as f64 * (0.0 - lambda), samp.round as f64 * (1.0 - lambda));
-    let adv_pdf = samp.to_pdf(min, max, epsilon, rounding.clone()).await;
+    let adv_pdf = samp.to_pdf(min, max, epsilon, rounding.clone());
     // 1b: convert into cdf
     let adv_cdf = adv_pdf.to_cdf();
     adv_cdf
@@ -216,7 +216,8 @@ struct Parameters {
     round_depth: usize,
     /// Upper bound on the probability that a single `inflate` / `deflate` 
     /// procedure fails to produce a stochastic upper / lower bound.
-    chernoff_error: f64
+    chernoff_error: f64,
+    flate_group: usize
 }
 
 /// Helper to compute new samples.
@@ -230,168 +231,62 @@ async fn add_layer_helper(precomp: Arc<Precomp>, params: Parameters, lambda: f64
 }
 
 /// Given samples `samp` and `lambda`, compute a new set of samples for the following round.
-async fn finite_sample_add_layer(samp: Samples, params: &Parameters, lambda: f64) -> Samples {
-    let mut data = Vec::default();
-    for _ in 0..params.parallelism_factor {
-        data.push(Vec::default());
-    }
-    let mut new_samps = Samples { round: samp.round + 1, data };
+async fn finite_sample_add_layer(adv_cdf: Cdf, last_round: usize, params: &Parameters, lambda: f64) -> Cdf {
+    let mut new_samps = Samples { round: last_round + 1, data: Vec::default() };
     let mut handles = Vec::with_capacity(params.parallelism_factor);
-    let adv_cdf = precompute_cdf(samp, params.epsilon, lambda, params.rounding).await;
     let precomp = Arc::new(precompute(adv_cdf.clone(), params.eta, params.beta, params.rounding).await);
     for _ in 0..params.parallelism_factor {
         handles.push(tokio::spawn(add_layer_helper(precomp.clone(), params.clone(), lambda)));
     }
     for (i, handle) in handles.into_iter().enumerate() {
-        new_samps.data[i] = handle.await.unwrap();
+        new_samps.data.append(&mut handle.await.unwrap());
     }
-    fooflate(new_samps.clone(), adv_cdf, params, lambda).await
+    fooflate(&mut new_samps, adv_cdf, params, lambda).await;
+    precompute_cdf(new_samps, params.epsilon, lambda, params.rounding).await
 }
-
-/*
-/// Inflate or deflate `samp` depending on the mode of the simulation.
-async fn fooflate(samp: Samples, params: &Parameters, lambda: f64) -> Samples {
-    let shift_percent = ((1.0 / params.chernoff_error).ln() / (2 * params.samples_drawn) as f64).sqrt() as f64;
-    let rounding = params.rounding;
-    let bounding_ptile = match rounding {
-        Rounding::Down => 1.0 - shift_percent,
-        Rounding::Up => shift_percent
-    };
-    let num_flate = match rounding {
-        Rounding::Down => (bounding_ptile * params.samples_drawn as f64).floor() as usize,
-        Rounding::Up => (bounding_ptile * params.samples_drawn as f64).ceil() as usize
-    };
-    // dirty binary search
-    let mut lo = samp.round as f64 * (0.0 - lambda);
-    let mut hi = samp.round as f64 * (1.0 - lambda);
-    loop {
-        let mut mid = (lo + hi) / 2.0;
-        let mut handles = Vec::with_capacity(params.parallelism_factor);
-        for vec in samp.data.clone() {
-            handles.push(tokio::spawn(async move {
-                let mut lo_count = 0;
-                let mut hi_count = 0;
-                for entry in vec.iter() {
-                    if *entry <= mid {
-                        hi_count += 1;
-                    }
-                    if *entry < mid {
-                        lo_count += 1;
-                    }
-                }
-                (lo_count, hi_count)
-            }));
-        }
-        let mut lo_tot = 0;
-        let mut hi_tot = 0;
-        for (i, handle) in handles.into_iter().enumerate() {
-            let (lo_x, hi_x) = handle.await.unwrap();
-            lo_tot += lo_x;
-            hi_tot += hi_x;
-        }
-        // println!("lo {:?} {:?} num {:?} hi {:?} {:?}", lo, lo_tot, num_flate, hi, hi_tot);
-        if lo_tot > num_flate {
-            hi = mid;
-            continue;
-        }
-        if hi_tot < num_flate {
-            lo = mid;
-            continue;
-        }
-        // lo_tot <= num_flate <= hi_tot
-        break;
-    }
-    // rounding
-    let bounding_cutoff = (lo + hi) / 2.0;
-    let mut handles = Vec::with_capacity(params.parallelism_factor);
-    for mut vec in samp.data.clone() {
-        handles.push(tokio::spawn(async move {
-            let mut count = 0;
-            for entry in vec.iter_mut() {
-                match rounding {
-                    Rounding::Down => {
-                        if *entry >= bounding_cutoff {
-                            *entry = samp.round as f64 * (0.0 - lambda);
-                            count += 1;
-                        }
-                    },
-                    Rounding::Up => {
-                        if *entry <= bounding_cutoff {
-                            *entry = samp.round as f64 * (1.0 - lambda);
-                            count += 1;
-                        }
-                    },
-                }
-            }
-            (vec, count)
-        }));
-    }
-    let mut data = Vec::default();
-    let mut count = 0;
-    for (i, handle) in handles.into_iter().enumerate() {
-        let (vec, count_partial) = handle.await.unwrap();
-        data.push(vec);
-        count += count_partial;
-    }
-    // println!("round {:?} some samps {:?}", samp.round, &data[0][0..10]);
-    Samples { round: samp.round, data }
-}
-*/
 
 /// Experimental.
-async fn fooflate(samp: Samples, old_cdf: Cdf, params: &Parameters, lambda: f64) -> Samples {
+async fn fooflate(new_samps: &mut Samples, old_cdf: Cdf, params: &Parameters, lambda: f64) {
     let shift_percent = ((1.0 / params.chernoff_error).ln() / (2 * params.samples_drawn) as f64).sqrt() as f64;
-    let rounding = params.rounding;
-    let num_flate = (shift_percent * params.samples_drawn as f64).ceil() as usize;
-    // inflating
-    // beta = 1 is the most adversarial case, let's assume that
-    // (beta = 1 can simulate any other value of beta anyway)
-    // each coin in ranked order is alpha prob adv, 1 - alpha prob honest 
-    // so coin k is in play with probability alpha^k
-    // suppose F is cdf from last round, G is next round
-    // then 1 - G(x) <= alpha/(1-alpha)(1 - F(x+lambda-1)) + alpha(1 - F(x+lambda))
-    // assumes x > -lambda
-    // deflating 
-    // loosely, can take beta = 1 and assume adversary picks coins to lose as much as possible
-    // then G(x) <= alpha/(1-alpha)F(x+lambda-1) + alpha F(x+lambda)
-    // assumes x < -lambda
-    let flated = old_cdf.flate(params.alpha, num_flate, params.samples_drawn, lambda, &params.rounding);
-    let mut vec = Vec::default();
-    for mini in samp.data {
-        vec.extend(mini);
-    }
-    match rounding {
-        Rounding::Down => vec.sort_by(|a, b| b.partial_cmp(a).unwrap()),
-        Rounding::Up => vec.sort_by(|a, b| a.partial_cmp(b).unwrap()),
-    }
-    // println!("flate {:?} of {:?}", num_flate, params.samples_drawn);
-    for i in 0..num_flate {
-        vec[i] = flated[i];
-    }
-    let mut data = Vec::default();
-    for i in 0..params.parallelism_factor {
-        data.push(Vec::new());
-        for j in 0..params.samples_drawn / params.parallelism_factor {
-            data[i].push(vec[i * (params.samples_drawn / params.parallelism_factor) + j]);
+    let num_shift = (shift_percent * params.samples_drawn as f64).ceil() as usize;
+    new_samps.data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    match params.rounding {
+        Rounding::Up => {
+            println!("shifty {:?}", num_shift);
+            let mut lo_idx = 0;
+            let mut hi_idx = new_samps.data.len();
+            'outer: loop {
+                for _ in 0..params.flate_group {
+                    new_samps.data[lo_idx] = if hi_idx == new_samps.data.len() {
+                        new_samps.round as f64 * (1.0 - lambda)
+                    } else {
+                        new_samps.data[hi_idx]
+                    };
+                    lo_idx += 1;
+                    if lo_idx >= num_shift {
+                        break 'outer;
+                    }
+                }
+                hi_idx -= 1;
+            }
+        },
+        Rounding::Down => {
+            for i in new_samps.data.len() - num_shift..new_samps.data.len() {
+                new_samps.data[i] = -lambda;
+            }
         }
     }
-    // println!("round {:?} some samps {:?} old exp {:?}", samp.round, &data[0][0..10], old_cdf.exp());
-    Samples { round: samp.round, data }
 }
 
 /// Find the expected reward of the adversary facing cost `lambda` to play each round.
 async fn simulate(params: &Parameters, lambda: f64) -> f64 {
-    let mut data = Vec::new();
-    for _ in 0..params.parallelism_factor {
-        data.push(Vec::from([0.0]));
-    }
-    let mut dist = Samples { round: 1, data };
+    let dist = Samples { round: 1, data: Vec::from([0.0]) };
+    let mut cdf = precompute_cdf(dist, params.epsilon, lambda, params.rounding).await;
     for i in 0..params.round_depth {
         println!("round {:?} at {:?}", i, SystemTime::now());
-        dist = finite_sample_add_layer(dist, params, lambda).await;
+        cdf = finite_sample_add_layer(cdf, i, params, lambda).await;
     }
-    let adv_cdf = precompute_cdf(dist, params.epsilon, lambda, params.rounding).await;
-    adv_cdf.exp()
+    cdf.exp()
 }
 
 /// Search for the value of `lambda` which yields zero expected adversary reward.
@@ -437,7 +332,7 @@ struct SimResult {
 
 async fn compute_interval(
     alpha: f64, beta: f64, epsilon: f64, eta: f64, chernoff_error: f64,
-    adv_coins: usize, round_depth: usize, samples_drawn: usize, parallelism_factor: usize
+    adv_coins: usize, round_depth: usize, samples_drawn: usize, flate_group: usize, parallelism_factor: usize
 ) -> SimResult {
     let mut lower_bound = 0.0;
     let mut upper_bound = 0.0;
@@ -453,7 +348,8 @@ async fn compute_interval(
             samples_drawn, 
             parallelism_factor,
             round_depth,
-            chernoff_error
+            chernoff_error,
+            flate_group
         };
         let lambda = search(&params).await;
         match rounding {
@@ -468,7 +364,7 @@ async fn compute_interval(
 
 #[tokio::main]
 async fn main() {
-    compute_interval(0.25, 0.0, 0.000005, 0.0, 0.0005, 10, 10, 5_000_000, 100).await;
+    compute_interval(0.1, 1.0, 0.0000005, 0.0, 0.0005, 7, 10, 8_000_000, 40, 100).await;
     // old: res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.2489775838399409, upper_bound: 0.26128399869948304 }
     // new: res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.25038047955192605, upper_bound: 0.2567438809667857 }
     /*
@@ -502,8 +398,8 @@ mod tests {
         }
         return Samples {
             round: 1,
-            data: Vec::from([data])
-        }.to_pdf(0.0, 1.0, 0.0001, Rounding::Down).await;
+            data
+        }.to_pdf(0.0, 1.0, 0.0001, Rounding::Down);
     }
 
     #[test]
