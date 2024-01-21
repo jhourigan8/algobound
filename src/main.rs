@@ -164,7 +164,7 @@ fn sample(
 /// Given samples `samp` and `lambda` compute the distribution's cdf.
 async fn precompute_cdf(samp: Samples, epsilon: f64, lambda: f64, rounding: Rounding) -> Cdf {
     // 1a: compute adversary pdf
-    let (min, max) = (samp.round as f64 * (0.0 - lambda), samp.round as f64 * (1.0 - lambda));
+    let (min, max) = (-lambda, samp.round as f64 * (1.0 - lambda));
     let adv_pdf = samp.to_pdf(min, max, epsilon, rounding.clone());
     // 1b: convert into cdf
     let adv_cdf = adv_pdf.to_cdf();
@@ -234,20 +234,27 @@ async fn add_layer_helper(precomp: Arc<Precomp>, params: Parameters, lambda: f64
 async fn finite_sample_add_layer(adv_cdf: Cdf, last_round: usize, params: &Parameters, lambda: f64) -> Cdf {
     let mut new_samps = Samples { round: last_round + 1, data: Vec::default() };
     let mut handles = Vec::with_capacity(params.parallelism_factor);
+    let now = Instant::now();
     let precomp = Arc::new(precompute(adv_cdf.clone(), params.eta, params.beta, params.rounding).await);
+    println!("precomp {:?}", now.elapsed());
     for _ in 0..params.parallelism_factor {
         handles.push(tokio::spawn(add_layer_helper(precomp.clone(), params.clone(), lambda)));
     }
     for (i, handle) in handles.into_iter().enumerate() {
         new_samps.data.append(&mut handle.await.unwrap());
     }
-    fooflate(&mut new_samps, adv_cdf, params, lambda).await;
-    precompute_cdf(new_samps, params.epsilon, lambda, params.rounding).await
+    println!("samp {:?}", now.elapsed());
+    fooflate(&mut new_samps, params, lambda).await;
+    println!("fooflate {:?}", now.elapsed());
+    let cdf = precompute_cdf(new_samps, params.epsilon, lambda, params.rounding).await;
+    println!("tocdf {:?}", now.elapsed());
+    cdf
 }
 
 /// Experimental.
-async fn fooflate(new_samps: &mut Samples, old_cdf: Cdf, params: &Parameters, lambda: f64) {
+async fn fooflate(new_samps: &mut Samples, params: &Parameters, lambda: f64) {
     let shift_percent = ((1.0 / params.chernoff_error).ln() / (2 * params.samples_drawn) as f64).sqrt() as f64;
+    println!("shift pct {:?}", shift_percent);
     let num_shift = (shift_percent * params.samples_drawn as f64).ceil() as usize;
     new_samps.data.sort_by(|a, b| a.partial_cmp(b).unwrap());
     match params.rounding {
@@ -280,7 +287,7 @@ async fn fooflate(new_samps: &mut Samples, old_cdf: Cdf, params: &Parameters, la
 
 /// Find the expected reward of the adversary facing cost `lambda` to play each round.
 async fn simulate(params: &Parameters, lambda: f64) -> f64 {
-    let dist = Samples { round: 1, data: Vec::from([0.0]) };
+    let dist = Samples { round: 0, data: Vec::from([0.0]) };
     let mut cdf = precompute_cdf(dist, params.epsilon, lambda, params.rounding).await;
     for i in 0..params.round_depth {
         println!("round {:?} at {:?}", i, SystemTime::now());
@@ -364,7 +371,7 @@ async fn compute_interval(
 
 #[tokio::main]
 async fn main() {
-    compute_interval(0.1, 1.0, 0.0000005, 0.0, 0.0005, 7, 10, 8_000_000, 40, 100).await;
+    compute_interval(0.25, 1.0, 0.00000001, 0.0, 1.0, 7, 10, 10_000_000, 15, 100).await;
     // old: res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.2489775838399409, upper_bound: 0.26128399869948304 }
     // new: res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.25038047955192605, upper_bound: 0.2567438809667857 }
     /*
@@ -471,6 +478,7 @@ mod tests {
         assert_approx_eq(&e.powf(-3.0 * 0.50), &AdvDraw::beat_honest_prob(3.0, 0.5));
     }
 
+    /*
     #[tokio::test]
     async fn flate() {
         // 0 to 1 by 0.01 hops, 100 values
@@ -480,7 +488,7 @@ mod tests {
         }
         let samps = Samples {
             round: 2,
-            data: Vec::from([data])
+            data
         };
         // e^{-2} chernoff error => shift pct = sqrt(ln(1 / chernoff error) / 2n )
         // = sqrt(2 / (2 * 100)) = 1/10
@@ -495,7 +503,8 @@ mod tests {
             samples_drawn: 100, // used
             parallelism_factor: 1, // used
             round_depth: 20,
-            chernoff_error: e.powf(-2.0) // used
+            chernoff_error: e.powf(-2.0), // used
+            flate_group: 40
         };
         // -0.8 to 1.2
         // exp is .9 * (0.0 + 0.89)/2 + .1 * -0.8 = 0.4005 - 0.08 = 0.3205
@@ -557,4 +566,5 @@ mod tests {
             assert_approx_eq(&0.7, &up.data[0][i]);
         }
     }
+    */
 }

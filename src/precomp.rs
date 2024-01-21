@@ -331,43 +331,38 @@ pub mod tests {
         }
         return Samples {
             round: 1,
-            data: Vec::from([data])
-        }.to_pdf(0.0, 2.0, 0.01, Rounding::Down).await;
+            data
+        }.to_pdf(0.0, 2.0, 0.01, Rounding::Down);
     }
 
     // Distribution 2: discrete distribution, round 10
     // 0.0 to 1.0 with 0.1 error
-    // points at 0.05, 0.1, 0.2, 0.4; 4 parallel arrays
+    // points at 0.05, 0.1, 0.2, 0.4
     async fn discrete_dist() -> Pdf {
         return Samples {
             round: 10,
-            data: Vec::from([
-                Vec::from([0.05]), Vec::from([0.1]), Vec::from([0.2]), Vec::from([0.4])
-            ])
-        }.to_pdf(0.0, 1.0, 0.1, Rounding::Up).await;
+            data: Vec::from([0.05, 0.1, 0.2, 0.4])
+        }.to_pdf(0.0, 1.0, 0.1, Rounding::Up);
     }
 
     // Distribution 3: binomial distribution, round 5
     // 0.0 to 10.0 with 1.0 error
-    // n = 10, p = 1/2; 8 parallel arrays
+    // n = 10, p = 1/2
     async fn binomial_dist() -> Pdf {
-        let mut data = Vec::<Vec<f64>>::new();
-        for i in 0..8 {
-            data.push(Vec::<f64>::new());
-            for j in 0..128 {
-                let mut num = 128 * i + j;
-                let mut score = 0f64;
-                while num > 0 {
-                    if num % 2 == 1 { score += 1.0; }
-                    num >>= 1;
-                }
-                data[i].push(score);
+        let mut data = Vec::<f64>::new();
+        for num in 0..1024 {
+            let mut num = num;
+            let mut score = 0f64;
+            while num > 0 {
+                if num % 2 == 1 { score += 1.0; }
+                num >>= 1;
             }
+            data.push(score);
         }
         return Samples {
             round: 5,
             data
-        }.to_pdf(0.0, 10.0, 1.0, Rounding::Up).await;
+        }.to_pdf(0.0, 10.0, 1.0, Rounding::Up);
     }
     
     #[test]
