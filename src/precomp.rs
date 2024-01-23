@@ -290,23 +290,8 @@ pub struct Table {
 
 impl Table {
     /// Get a reference to the value (`theta`, `gamma`) is mapped to.
-    pub fn get(&self, theta: f64, gamma: f64, rounding: &Rounding) -> &f64 {
-        // println!("table get {:?} {:?}", theta, gamma);
-        // Check all values in containing grid and return smallest / largest depending on rounding.
-        let mut ret = match rounding {
-            Rounding::Down => &f64::MAX,
-            Rounding::Up => &f64::MIN
-        };
-        for m1 in [Rounding::Down, Rounding::Up] {
-            for m2 in [Rounding::Down, Rounding::Up] {
-                let val = self.f.get(gamma, &m1).get(theta, &m2);
-                match rounding {
-                    Rounding::Down => if val < ret { ret = val; },
-                    Rounding::Up => if val > ret { ret = val; },
-                }
-            }
-        }
-        ret
+    pub fn get(&self, theta: f64, gamma: f64, rounding_theta: &Rounding, rounding_gamma: &Rounding) -> &f64 {
+        self.f.get(gamma, rounding_gamma).get(theta, rounding_theta)
     }
 }
 

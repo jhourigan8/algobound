@@ -153,8 +153,8 @@ fn sample(
             let opposite = &!rounding.clone();
             for i_star in 1..=adv_coins {
                 let best = adv.best_from(i_star, alpha, beta);
-                cum -= table.get(AdvDraw::beat_seen_honest_prob(adv.coins[i_star], alpha, beta), best, opposite);
-                cum += table.get(AdvDraw::beat_seen_honest_prob(adv.coins[i_star + 1], alpha, beta), best, &rounding);
+                cum += table.get(AdvDraw::beat_seen_honest_prob(adv.coins[i_star + 1], alpha, beta), best, &!rounding, &rounding);
+                cum -= table.get(AdvDraw::beat_seen_honest_prob(adv.coins[i_star], alpha, beta), best, &rounding, &rounding);
             }
             cum - lambda
         }
@@ -298,8 +298,7 @@ async fn simulate(params: &Parameters, lambda: f64) -> f64 {
 
 /// Search for the value of `lambda` which yields zero expected adversary reward.
 async fn search(params: &Parameters) -> f64 {
-    let target = params.epsilon + params.eta + 2.0 / (params.samples_drawn as f64).sqrt();
-    println!("target {:?}", target);
+    let target = 0.5 / (params.samples_drawn as f64).sqrt();
     let mut lo = params.alpha;
     let mut lo_reward = simulate(&params, lo).await;
     let mut hi = params.alpha + params.alpha * params.alpha; // empirically always an upper bound
@@ -344,7 +343,6 @@ async fn compute_interval(
     let mut lower_bound = 0.0;
     let mut upper_bound = 0.0;
     for rounding in [Rounding::Down, Rounding::Up] {
-        // println!("{:?} {:?} {:?} at {:?}", rounding, alpha, beta, SystemTime::now());
         let params = Parameters {
             adv_coins,
             epsilon,
@@ -369,21 +367,58 @@ async fn compute_interval(
     res
 }
 
+async fn check_point(
+    tight: SimResult, width: f64,
+    alpha: f64, beta: f64, epsilon: f64, eta: f64, chernoff_error: f64,
+    adv_coins: usize, round_depth: usize, samples_drawn: usize, flate_group: usize, parallelism_factor: usize
+) {
+    let point = (tight.upper_bound + tight.lower_bound) / 2.0;
+    let mut success = true;
+    for rounding in [Rounding::Down, Rounding::Up] {
+        let params = Parameters {
+            adv_coins,
+            epsilon,
+            eta,
+            alpha,
+            beta,
+            rounding,
+            samples_drawn, 
+            parallelism_factor,
+            round_depth,
+            chernoff_error,
+            flate_group
+        };
+        let lambda = match rounding {
+            Rounding::Down => point - 0.25 * width,
+            Rounding::Up => point + 0.75 * width
+        };
+        let reward = simulate(&params, lambda).await;
+        match rounding {
+            Rounding::Down => if reward < 0.0 { success = false; },
+            Rounding::Up => if reward > 0.0 { success = false; },
+        }
+        println!("reward {:?} params {:?}", reward, params);
+    }
+    success
+}
+
 #[tokio::main]
 async fn main() {
-    compute_interval(0.25, 1.0, 0.00000001, 0.0, 1.0, 7, 10, 10_000_000, 15, 100).await;
-    // old: res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.2489775838399409, upper_bound: 0.26128399869948304 }
-    // new: res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.25038047955192605, upper_bound: 0.2567438809667857 }
+    let tight = compute_interval(0.25, 0.0, 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100).await;
+    let checks = check_point(tight, 0.01, 0.25, 0.0, 0.0000001, 0.0, 1.0, 7, 10, 1_000_000, 20, 100).await;
     /*
-    let start = Instant::now();
-    let res = compute_interval(0.25, 0.0, 0.0000001, 0.0, 0.0005, 10, 10, 50_000_000, 100).await;
-    println!("beta 0.0 {:?} width {:?}", start.elapsed(), res.upper_bound - res.lower_bound);
-    let start = Instant::now();
-    let res = compute_interval(0.25, 0.5, 0.00005, 0.00005, 0.0005, 10, 10, 50_000_000, 100).await;
-    println!("beta 0.5 {:?} width {:?}", start.elapsed(), res.upper_bound - res.lower_bound);
-    let start = Instant::now();
-    let res = compute_interval(0.25, 1.0, 0.0000001, 0.0, 0.0005, 10, 10, 50_000_000, 100).await;
-    println!("beta 1.0 {:?} width {:?}", start.elapsed(), res.upper_bound - res.lower_bound);
+    // res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.2523253688367698, upper_bound: 0.25374179234262856 }
+    compute_interval(0.25, 0.0, 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100).await; -> 0.2530
+    // res SimResult { alpha: 0.25, beta: 0.01, lower_bound: 0.2515111846113837, upper_bound: 0.25501946390208863 }
+    compute_interval(0.25, 0.01, 0.0010, 0.0001, 1.0, 7, 10, 500_000, 20, 100).await; -> 0.2532
+    // res SimResult { alpha: 0.25, beta: 0.33, lower_bound: 0.2529557762463644, upper_bound: 0.25613922998564437 }
+    compute_interval(0.25, 0.33, 0.0010, 0.0001, 1.0, 7, 10, 500_000, 20, 100).await; -> 0.2545
+    // res SimResult { alpha: 0.25, beta: 0.67, lower_bound: 0.2548422152727763, upper_bound: 0.25855874210641727 }
+    compute_interval(0.25, 0.67, 0.0010, 0.0001, 1.0, 7, 10, 500_000, 20, 100).await; -> 0.2567
+    // res SimResult { alpha: 0.25, beta: 0.99, lower_bound: 0.26110185650623824, upper_bound: 0.26559568812136763 }
+    compute_interval(0.25, 0.99, 0.0010, 0.0001, 1.0, 7, 10, 500_000, 20, 100).await; -> 0.2633
+    // res SimResult { alpha: 0.25, beta: 1.0, lower_bound: 0.2627840073683429, upper_bound: 0.26393765814823444 }
+    compute_interval(0.25, 1.0, 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100).await; -> 0.2634
     */
 }
 
@@ -478,7 +513,6 @@ mod tests {
         assert_approx_eq(&e.powf(-3.0 * 0.50), &AdvDraw::beat_honest_prob(3.0, 0.5));
     }
 
-    /*
     #[tokio::test]
     async fn flate() {
         // 0 to 1 by 0.01 hops, 100 values
@@ -486,7 +520,7 @@ mod tests {
         for i in 0..100 {
             data.push(i as f64 * 0.01);
         }
-        let samps = Samples {
+        let mut samps = Samples {
             round: 2,
             data
         };
@@ -504,67 +538,77 @@ mod tests {
             parallelism_factor: 1, // used
             round_depth: 20,
             chernoff_error: e.powf(-2.0), // used
-            flate_group: 40
+            flate_group: 1 // used
         };
-        // -0.8 to 1.2
-        // exp is .9 * (0.0 + 0.89)/2 + .1 * -0.8 = 0.4005 - 0.08 = 0.3205
-        println!("{:?}", fooflate(samps.clone(), &params, 0.4).await.data[0]);
-        let down = fooflate(samps.clone(), &params, 0.4).await;
+        // round down: 10 sent to -lambda = -0.4,
+        // exp is .9 * (0.0 + 0.89)/2 + .1 * -0.4 = 0.3605
+        fooflate(&mut samps, &params, 0.4).await;
         let mut sum = 0.0;
         for i in 0..100 {
-            sum += down.data[0][i]
+            sum += samps.data[i];
+            println!("{:?}", samps.data[i]);
         }
-        assert_approx_eq(&0.3205, &(sum/100.0));
-        // exp is .9 * (0.1 + 0.99)/2 + .1 * 1.2 = 0.4905 + .12 = 0.6105
+        assert_approx_eq(&0.3605, &(sum/100.0));
+        // round up: 1 sample sent to 2*(1-lambda) = 1.2
+        // other 9 sent to 0.91 thru 0.99
+        // exp is .9 * (0.1 + 0.99)/2 + .01 * 1.2 + 0.09 * 0.95 = 0.5880
+        let mut data = Vec::new();
+        for i in 0..100 {
+            data.push(i as f64 * 0.01);
+        }
+        let mut samps = Samples {
+            round: 2,
+            data
+        };
         params.rounding = Rounding::Up;
-        let up = fooflate(samps.clone(), &params, 0.4).await;
+        fooflate(&mut samps, &params, 0.4).await;
         let mut sum = 0.0;
         for i in 0..100 {
-            sum += up.data[0][i]
+            sum += samps.data[i]
         }
-        assert_approx_eq(&0.6105, &(sum/100.0));
+        assert_approx_eq(&0.5880, &(sum/100.0));
         // sqrt(x) for x=0 to 49
-        params.parallelism_factor = 5;
         params.samples_drawn = 50;
         let mut data = Vec::new();
-        for i in 0..5 {
-            data.push(Vec::new());
-            for j in 0..10 {
-                data[i].push((10.0 * i as f64 + j as f64).sqrt());
-            }
+        for i in 0..50 {
+            data.push((i as f64).sqrt());
         }
-        let samps = Samples { round: 10, data };
-        let up = fooflate(samps, &params, 0.1).await;
-        // -1.0 to 9.0
+        let mut up = Samples { round: 10, data };
+        fooflate(&mut up, &params, 0.1).await;
         // shift pct = sqrt(2 / (2 * 50)) = sqrt(1/50) = 8 values
         let mut tgt = 0.0;
         for i in 0..50 {
             if i < 8 { 
-                tgt += 9.0
+                // 10 * (1 - lambda) = 9
+                if i == 0 {
+                    tgt += 9.0;
+                }
+                // i^th smallest samp
+                else {
+                    tgt += ((50 - i) as f64).sqrt();
+                }
             } else {
                 tgt += (i as f64).sqrt();
             }
         }
         let mut sum = 0.0;
-        for i in 0..5 {
-            println!("{:?}", up.data[i]);
-            for j in 0..10 {
-                sum += up.data[i][j];
-            }
+        for i in 0..50 {
+            sum += up.data[i];
         }
         assert_approx_eq(&tgt, &sum);
-        // all same val => should round all
-        params.parallelism_factor = 1;
+        // shift pct = sqrt(2 / (2 * 10)) = sqrt(1/10) = 4 values
+        // max is 1 * (1 - lambda) = 0.7
         params.samples_drawn = 10;
         let mut data = Vec::new();
         for i in 0..10 {
             data.push(0.0);
         }
-        let samps = Samples { round: 1, data: Vec::from([data]) };
-        let up = fooflate(samps, &params, 0.3).await;
+        let mut up = Samples { round: 1, data };
+        fooflate(&mut up, &params, 0.3).await;
+        let mut sum = 0.0;
         for i in 0..10 {
-            assert_approx_eq(&0.7, &up.data[0][i]);
+            sum += up.data[i];
         }
+        assert_approx_eq(&0.7, &sum);
     }
-    */
 }
