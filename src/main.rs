@@ -1,5 +1,6 @@
 mod precomp;
 
+use std::env;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rand::Rng;
@@ -190,7 +191,7 @@ async fn precompute(
 }
 
 /// A struct to carry around needed parameters.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Parameters {
     /// The number of coins drawn for the adversary assuming their stake is spread
     /// across arbitrarily many accounts.
@@ -244,10 +245,13 @@ async fn finite_sample_add_layer(adv_cdf: Cdf, last_round: usize, params: &Param
         new_samps.data.append(&mut handle.await.unwrap());
     }
     println!("samp {:?}", now.elapsed());
+    let cdf = precompute_cdf(new_samps.clone(), params.epsilon, lambda, params.rounding).await;
+    println!("unflated: exp {:?} var {:?}", cdf.exp(), cdf.var());
     fooflate(&mut new_samps, params, lambda).await;
     println!("fooflate {:?}", now.elapsed());
     let cdf = precompute_cdf(new_samps, params.epsilon, lambda, params.rounding).await;
     println!("tocdf {:?}", now.elapsed());
+    println!("flated: exp {:?} var {:?}", cdf.exp(), cdf.var());
     cdf
 }
 
@@ -371,7 +375,7 @@ async fn check_point(
     tight: SimResult, width: f64,
     alpha: f64, beta: f64, epsilon: f64, eta: f64, chernoff_error: f64,
     adv_coins: usize, round_depth: usize, samples_drawn: usize, flate_group: usize, parallelism_factor: usize
-) {
+) -> bool {
     let point = (tight.upper_bound + tight.lower_bound) / 2.0;
     let mut success = true;
     for rounding in [Rounding::Down, Rounding::Up] {
@@ -402,10 +406,43 @@ async fn check_point(
     success
 }
 
+static HELP_MSG : &str =
+"usage: cargo run -- fixed-parameter fixed-value step-size target-width fooflate
+\tfixed-parameter: string literal `alpha` or `beta`
+\tfixed-value: value of fixed parameter
+\tstep-size: step size of other parameter
+\ttarget-width: desired output interval width
+\tfooflate: string literal `true` or `false`";
+
 #[tokio::main]
 async fn main() {
-    let tight = compute_interval(0.25, 0.0, 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100).await;
-    let checks = check_point(tight, 0.01, 0.25, 0.0, 0.0000001, 0.0, 1.0, 7, 10, 1_000_000, 20, 100).await;
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 6 {
+        panic!("{}", HELP_MSG);
+    }
+    let (mut alpha, mut beta, alpha_step, beta_step) = {
+        let val: f64 = args[2].parse().expect(HELP_MSG);
+        let step: f64 = args[3].parse().expect(HELP_MSG);
+        match args[1].as_str() {
+            "alpha" => (val, 0.0, 0.0, step),
+            "beta" => (0.0, val, step, 0.0),
+            _ => { panic!("{}", HELP_MSG); }
+        }
+    }
+    let target_width: f64 = args[4].parse().expect(HELP_MSG);
+    let fooflate: bool = args[5].parse().expect(HELP_MSG);
+    let tight = compute_interval(0.25, 1.0, 0.00000002, 0.0, 0.0005, 7, 10, 10_000_000, 20, 100).await;
+    // let checks = check_point(tight, 0.01, 0.25, 0.0, 0.0000001, 0.0, 1.0, 7, 10, 1_000_000, 20, 100).await;
+    // todo: 
+    // 1 get rid of last round inflate deflate
+    // 2 function to set number of rounds
+    // 3 running inflate deflate
+    // alpha = 0.01, 0.07, 0.15, 0.25 across all beta in 0.04 increments
+    // beta = 0.00, 0.50, 1.0 across all alpha in 0.01 increments
+
+    // hoeffding inequality: pr t dev <= exp(-2t^2/nr^2), take t=omega(rsqrt(n)), e.g. 5rsqrt(n)
+    // 
+
     /*
     // res SimResult { alpha: 0.25, beta: 0.0, lower_bound: 0.2523253688367698, upper_bound: 0.25374179234262856 }
     compute_interval(0.25, 0.0, 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100).await; -> 0.2530

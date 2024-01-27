@@ -156,6 +156,22 @@ impl Cdf {
         tot
     }
 
+    /// Compute the variance of a random variable drawn according to this cdf.
+    pub fn var(&self) -> f64 {
+        let min = self.f.min;
+        let mut tot = 0f64;
+        let mut prev = 0f64;
+        for i in 0..self.f.vals.len() {
+            let mut sq_val = (min + i as f64 * self.f.error);
+            sq_val *= sq_val;
+            tot += (self.f.vals[i] - prev) * sq_val;
+            prev = self.f.vals[i];
+        }
+        let mut sq_exp = self.exp();
+        sq_exp *= sq_exp;
+        tot - sq_exp
+    }
+
     /// Compute Emax(x) = E[max(x, r)] where r ~ cdf.
     /// Emax has same domain and discretization error as the cdf.
     pub fn to_emax(&self) -> Emax {
