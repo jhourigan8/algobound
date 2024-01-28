@@ -157,19 +157,18 @@ impl Cdf {
     }
 
     /// Compute the variance of a random variable drawn according to this cdf.
-    pub fn var(&self) -> f64 {
+    pub fn moment(&self, k: i32) -> f64 {
+        let exp = self.exp();
         let min = self.f.min;
         let mut tot = 0f64;
         let mut prev = 0f64;
         for i in 0..self.f.vals.len() {
-            let mut sq_val = (min + i as f64 * self.f.error);
-            sq_val *= sq_val;
-            tot += (self.f.vals[i] - prev) * sq_val;
+            let val = (min + i as f64 * self.f.error);
+            let pow_dif = (val - exp).powi(k);
+            tot += (self.f.vals[i] - prev) * pow_dif;
             prev = self.f.vals[i];
         }
-        let mut sq_exp = self.exp();
-        sq_exp *= sq_exp;
-        tot - sq_exp
+        tot
     }
 
     /// Compute Emax(x) = E[max(x, r)] where r ~ cdf.
@@ -484,12 +483,12 @@ pub mod tests {
         let table = emax.to_table(0.01, 0.5, Rounding::Down).await;
         // fix gamma = 1. then while zeta <= 0.5, this is just gamma
         // so diff between zeta = 0.0 and zeta = 0.5 should be 0.5
-        assert_approx_eq(&(table.get(0.0, 1.0, &Rounding::Up) - table.get(0.50, 1.0, &Rounding::Up)), &0.50);
+        assert_approx_eq(&(table.get(0.0, 1.0, &Rounding::Down, &Rounding::Up) - table.get(0.50, 1.0, &Rounding::Down, &Rounding::Up)), &0.50);
         // now, from 0.5 to 1.0 it's integrating zeta * (1 + 1/4zeta^2)
         // lower bounding => picks lower zeta each time
         // wolfram alpha gives .547043044. we should get something slightly below this 
         // due to rounded down emax gets. let's check:
-        assert!(table.get(-0.00001, 1.0, &Rounding::Down) < &(0.50 + 0.547043044));
-        assert!(table.get(-0.00001, 1.0, &Rounding::Down) > &(0.50 + 0.547043044 - 0.01));
+        assert!(table.get(-0.00001, 1.0, &Rounding::Up, &Rounding::Down) < &(0.50 + 0.547043044));
+        assert!(table.get(-0.00001, 1.0, &Rounding::Up, &Rounding::Down) > &(0.50 + 0.547043044 - 0.01));
     }
 }

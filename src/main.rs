@@ -8,6 +8,9 @@ use core::array;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use std::ops::Not;
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io::prelude::*;
 
 use crate::precomp::*;
 
@@ -237,33 +240,33 @@ async fn finite_sample_add_layer(adv_cdf: Cdf, last_round: usize, params: &Param
     let mut handles = Vec::with_capacity(params.parallelism_factor);
     let now = Instant::now();
     let precomp = Arc::new(precompute(adv_cdf.clone(), params.eta, params.beta, params.rounding).await);
-    println!("precomp {:?}", now.elapsed());
+    // println!("precomp {:?}", now.elapsed());
     for _ in 0..params.parallelism_factor {
         handles.push(tokio::spawn(add_layer_helper(precomp.clone(), params.clone(), lambda)));
     }
     for (i, handle) in handles.into_iter().enumerate() {
         new_samps.data.append(&mut handle.await.unwrap());
     }
-    println!("samp {:?}", now.elapsed());
+    // println!("samp {:?}", now.elapsed());
     let cdf = precompute_cdf(new_samps.clone(), params.epsilon, lambda, params.rounding).await;
-    println!("unflated: exp {:?} var {:?}", cdf.exp(), cdf.var());
+    // println!("unflated: exp {:?} var {:?} 4th {:?} 6th {:?}", cdf.exp(), cdf.moment(2), cdf.moment(4), cdf.moment(6));
     fooflate(&mut new_samps, params, lambda).await;
-    println!("fooflate {:?}", now.elapsed());
+    // println!("fooflate {:?}", now.elapsed());
     let cdf = precompute_cdf(new_samps, params.epsilon, lambda, params.rounding).await;
-    println!("tocdf {:?}", now.elapsed());
-    println!("flated: exp {:?} var {:?}", cdf.exp(), cdf.var());
+    // println!("tocdf {:?}", now.elapsed());
+    // println!("flated: exp {:?} var {:?} 4th {:?} 6th {:?}", cdf.exp(), cdf.moment(2), cdf.moment(4), cdf.moment(6));
     cdf
 }
 
 /// Experimental.
 async fn fooflate(new_samps: &mut Samples, params: &Parameters, lambda: f64) {
     let shift_percent = ((1.0 / params.chernoff_error).ln() / (2 * params.samples_drawn) as f64).sqrt() as f64;
-    println!("shift pct {:?}", shift_percent);
+    // println!("shift pct {:?}", shift_percent);
     let num_shift = (shift_percent * params.samples_drawn as f64).ceil() as usize;
     new_samps.data.sort_by(|a, b| a.partial_cmp(b).unwrap());
     match params.rounding {
         Rounding::Up => {
-            println!("shifty {:?}", num_shift);
+            // println!("shifty {:?}", num_shift);
             let mut lo_idx = 0;
             let mut hi_idx = new_samps.data.len();
             'outer: loop {
@@ -294,7 +297,7 @@ async fn simulate(params: &Parameters, lambda: f64) -> f64 {
     let dist = Samples { round: 0, data: Vec::from([0.0]) };
     let mut cdf = precompute_cdf(dist, params.epsilon, lambda, params.rounding).await;
     for i in 0..params.round_depth {
-        println!("round {:?} at {:?}", i, SystemTime::now());
+        // println!("round {:?} at {:?}", i, SystemTime::now());
         cdf = finite_sample_add_layer(cdf, i, params, lambda).await;
     }
     cdf.exp()
@@ -314,9 +317,9 @@ async fn search(params: &Parameters) -> f64 {
             Rounding::Up => lo + (hi - lo) * ((lo_reward + target) / (lo_reward - hi_reward))
         };
         lambda = lambda.max(0.0).min(1.0);
-        println!("lo {:?} re {:?}, hi {:?} re {:?}, lambda {:?}", lo, lo_reward, hi, hi_reward, lambda);
+        // println!("lo {:?} re {:?}, hi {:?} re {:?}, lambda {:?}", lo, lo_reward, hi, hi_reward, lambda);
         let reward = simulate(&params, lambda).await;
-        println!("lambda = {:?}, reward = {:?}, time = {:?}", lambda, reward, SystemTime::now());
+        // println!("lambda = {:?}, reward = {:?}, time = {:?}", lambda, reward, SystemTime::now());
         match params.rounding {
             Rounding::Down => if reward > 0.0 && reward < 2.0 * target { return lambda; },
             Rounding::Up => if reward < 0.0 && reward > -2.0 * target { return lambda; }
@@ -341,25 +344,12 @@ struct SimResult {
 }
 
 async fn compute_interval(
-    alpha: f64, beta: f64, epsilon: f64, eta: f64, chernoff_error: f64,
-    adv_coins: usize, round_depth: usize, samples_drawn: usize, flate_group: usize, parallelism_factor: usize
+    alpha: f64, beta: f64, chernoff_error: f64, target_width: f64
 ) -> SimResult {
     let mut lower_bound = 0.0;
     let mut upper_bound = 0.0;
     for rounding in [Rounding::Down, Rounding::Up] {
-        let params = Parameters {
-            adv_coins,
-            epsilon,
-            eta,
-            alpha,
-            beta,
-            rounding,
-            samples_drawn, 
-            parallelism_factor,
-            round_depth,
-            chernoff_error,
-            flate_group
-        };
+        let params = compute_params(alpha, beta, chernoff_error, target_width, rounding);
         let lambda = search(&params).await;
         match rounding {
             Rounding::Down => lower_bound = lambda,
@@ -367,71 +357,161 @@ async fn compute_interval(
         };
     }
     let res = SimResult { alpha, beta, lower_bound, upper_bound };
-    println!("res {:?}", res);
     res
 }
 
 async fn check_point(
-    tight: SimResult, width: f64,
-    alpha: f64, beta: f64, epsilon: f64, eta: f64, chernoff_error: f64,
-    adv_coins: usize, round_depth: usize, samples_drawn: usize, flate_group: usize, parallelism_factor: usize
+    tight: SimResult, alpha: f64, beta: f64, chernoff_error: f64, target_width: f64
 ) -> bool {
     let point = (tight.upper_bound + tight.lower_bound) / 2.0;
     let mut success = true;
     for rounding in [Rounding::Down, Rounding::Up] {
-        let params = Parameters {
-            adv_coins,
-            epsilon,
-            eta,
-            alpha,
-            beta,
-            rounding,
-            samples_drawn, 
-            parallelism_factor,
-            round_depth,
-            chernoff_error,
-            flate_group
-        };
+        let params = compute_params(alpha, beta, chernoff_error, target_width, rounding);
         let lambda = match rounding {
-            Rounding::Down => point - 0.25 * width,
-            Rounding::Up => point + 0.75 * width
+            Rounding::Down => point - 0.25 * target_width,
+            Rounding::Up => point + 0.75 * target_width
         };
         let reward = simulate(&params, lambda).await;
         match rounding {
             Rounding::Down => if reward < 0.0 { success = false; },
             Rounding::Up => if reward > 0.0 { success = false; },
         }
-        println!("reward {:?} params {:?}", reward, params);
+        // println!("reward {:?} params {:?}", reward, params);
     }
     success
 }
 
+fn compute_params(
+    alpha: f64, beta: f64, chernoff_error: f64, target_width: f64, rounding: Rounding
+) -> Parameters {
+    if alpha > 0.29 { panic!("alpha too large"); }
+    if chernoff_error != 1.0 { panic!("fooflate not supported"); }
+    let round_coin_map = [
+        (0.02, 3, 4), (0.05, 4, 4), (0.08, 5, 4), (0.10, 6, 4), (0.12, 6, 5),
+        (0.15, 7, 5), (0.17, 8, 5), (0.2, 9, 6), (0.23, 10, 6), (0.25, 11, 7),
+        (0.26, 12, 8), (0.27, 13, 8), (0.28, 14, 8), (0.29, 15, 8)
+    ];
+    let mut i = 0;
+    let (adv_coins, round_depth) = loop {
+        if alpha <= round_coin_map[i].0 {
+            break (round_coin_map[i].1, round_coin_map[i].2)
+        }
+        i += 1;
+    };
+    let (epsilon, eta, samples_drawn) = if beta == 0.0 || beta == 1.0 {
+        let from_baseline = target_width / 0.005;
+        // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.002
+        (0.00001 * from_baseline, 0.0, (500_000 as f64 / (from_baseline * from_baseline)).ceil() as usize)
+    } else {
+        let from_baseline = target_width / 0.005;
+        // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.005
+        (0.001 * from_baseline, 0.0001 * from_baseline, (500_000 as f64 / (from_baseline * from_baseline)).ceil() as usize)
+    };
+    Parameters {
+        adv_coins,
+        epsilon,
+        eta,
+        alpha,
+        beta,
+        rounding,
+        samples_drawn, 
+        parallelism_factor: 100,
+        round_depth,
+        chernoff_error,
+        flate_group: 30
+    }
+}
+
 static HELP_MSG : &str =
-"usage: cargo run -- fixed-parameter fixed-value step-size target-width fooflate
+"usage: cargo run -- fixed-parameter fixed-value step-size target-width chernoff-error
 \tfixed-parameter: string literal `alpha` or `beta`
 \tfixed-value: value of fixed parameter
 \tstep-size: step size of other parameter
 \ttarget-width: desired output interval width
-\tfooflate: string literal `true` or `false`";
+\tchernoff-error: upper bound on fooflate error probability each round";
 
 #[tokio::main]
 async fn main() {
+    // bounding with chebyshev
+    // get samples for X^2
+    // run inflate procedure on those
+    // this gives high prob bound on Var[X]
+    // (napkin: 1 in 1000 or less up to r^2 = 100, so maybe +0.1)
+    // bound should be at most 1/4, so 1/2 stdev bound
+    // with 1 milli samples, 1/2k stdev bound
+    // then 1/200 loss.. not great
+    // we could try this with barry-essen
+    // distance at most rho/sigma^3sqrt(n) to normal cdf
+    // this is at most r/sigmasqrt(n)
+    // again if bound sigma can get smth like 4/sqrt(n)
     let args: Vec<String> = env::args().collect();
     if args.len() != 6 {
         panic!("{}", HELP_MSG);
     }
-    let (mut alpha, mut beta, alpha_step, beta_step) = {
+    let (alpha_vals, beta_vals) = {
         let val: f64 = args[2].parse().expect(HELP_MSG);
         let step: f64 = args[3].parse().expect(HELP_MSG);
+        let mut vec = Vec::new();
         match args[1].as_str() {
-            "alpha" => (val, 0.0, 0.0, step),
-            "beta" => (0.0, val, step, 0.0),
+            "alpha" => {
+                vec.push(0.0);
+                while vec[vec.len() - 1] != 1.0 {
+                    let mut val = vec[vec.len() - 1] + step;
+                    if val > 1.0 - 0.001 { val = 1.0; }
+                    vec.push(val);
+                }
+                (Vec::from([val]), vec)
+            },
+            "beta" => {
+                vec.push(0.01);
+                while vec[vec.len() - 1] != 0.29 { 
+                    let mut val = vec[vec.len() - 1] + step;
+                    if val > 0.29 - 0.001 { val = 0.29; }
+                    vec.push(val);
+                }
+                (vec, Vec::from([val]))
+            }
             _ => { panic!("{}", HELP_MSG); }
         }
-    }
+    };
     let target_width: f64 = args[4].parse().expect(HELP_MSG);
-    let fooflate: bool = args[5].parse().expect(HELP_MSG);
-    let tight = compute_interval(0.25, 1.0, 0.00000002, 0.0, 0.0005, 7, 10, 10_000_000, 20, 100).await;
+    let chernoff_error = args[5].parse().expect(HELP_MSG);
+    let start = Instant::now();
+    let mut ctr = 1;
+    let num = alpha_vals.len() * beta_vals.len();
+    let mut results = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open("results.txt")
+        .unwrap();
+    for alpha in alpha_vals {
+        for beta in &beta_vals {
+            println!("Running simulation {:?} of {:?}.", ctr, num);
+            let interval = compute_interval(alpha, *beta, chernoff_error, target_width).await;
+            println!("{:?}", interval);
+            results.write_all(
+                &format!(
+                    "{:?}, {:?}, {:?}, {:?}, {:?}\n", 
+                    alpha, 
+                    beta, 
+                    chernoff_error,
+                    interval.lower_bound,
+                    interval.upper_bound
+                ).into_bytes()
+            ).unwrap();
+            results.flush().unwrap();
+            let elapsed = start.elapsed();
+            let est = elapsed
+                .checked_mul((num - ctr) as u32).expect("")
+                .checked_div(ctr as u32).expect("");
+            ctr += 1;
+            println!("Estimated remaining time: {:?}", est);
+        }
+    }
+    println!("Simulations complete!");
+    println!("Runtime was {:?}", start.elapsed());
+    
     // let checks = check_point(tight, 0.01, 0.25, 0.0, 0.0000001, 0.0, 1.0, 7, 10, 1_000_000, 20, 100).await;
     // todo: 
     // 1 get rid of last round inflate deflate
