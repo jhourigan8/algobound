@@ -423,7 +423,7 @@ fn compute_params(
 }
 
 static HELP_MSG : &str =
-"usage: cargo run -- fixed-parameter fixed-value step-size target-width chernoff-error
+"usage: cargo run fixed-parameter fixed-value step-size target-width chernoff-error
 \tfixed-parameter: string literal `alpha` or `beta`
 \tfixed-value: value of fixed parameter
 \tstep-size: step size of other parameter
