@@ -240,19 +240,24 @@ async fn finite_sample_add_layer(adv_cdf: Cdf, last_round: usize, params: &Param
     let mut handles = Vec::with_capacity(params.parallelism_factor);
     let now = Instant::now();
     let precomp = Arc::new(precompute(adv_cdf.clone(), params.eta, params.beta, params.rounding).await);
-    // println!("precomp {:?}", now.elapsed());
+    println!("table time: {:?}", now.elapsed());
+    let now = Instant::now();
     for _ in 0..params.parallelism_factor {
         handles.push(tokio::spawn(add_layer_helper(precomp.clone(), params.clone(), lambda)));
     }
     for (i, handle) in handles.into_iter().enumerate() {
         new_samps.data.append(&mut handle.await.unwrap());
     }
-    // println!("samp {:?}", now.elapsed());
-    let cdf = precompute_cdf(new_samps.clone(), params.epsilon, lambda, params.rounding).await;
+    println!("sampling time: {:?}", now.elapsed());
+    // let cdf = precompute_cdf(new_samps.clone(), params.epsilon, lambda, params.rounding).await;
     // println!("unflated: exp {:?} var {:?} 4th {:?} 6th {:?}", cdf.exp(), cdf.moment(2), cdf.moment(4), cdf.moment(6));
+    let now = Instant::now();
     fooflate(&mut new_samps, params, lambda).await;
+    println!("fooflate time: {:?}", now.elapsed());
     // println!("fooflate {:?}", now.elapsed());
+    let now = Instant::now();
     let cdf = precompute_cdf(new_samps, params.epsilon, lambda, params.rounding).await;
+    println!("cdf time: {:?}", now.elapsed());
     // println!("tocdf {:?}", now.elapsed());
     // println!("flated: exp {:?} var {:?} 4th {:?} 6th {:?}", cdf.exp(), cdf.moment(2), cdf.moment(4), cdf.moment(6));
     cdf
@@ -344,12 +349,12 @@ struct SimResult {
 }
 
 async fn compute_interval(
-    alpha: f64, beta: f64, chernoff_error: f64, target_width: f64
+    alpha: f64, beta: f64, chernoff_error: f64, target_width: f64, samp_scale: f64
 ) -> SimResult {
     let mut lower_bound = 0.0;
     let mut upper_bound = 0.0;
     for rounding in [Rounding::Down, Rounding::Up] {
-        let params = compute_params(alpha, beta, chernoff_error, target_width, rounding);
+        let params = compute_params(alpha, beta, chernoff_error, target_width, samp_scale, rounding);
         let lambda = search(&params).await;
         match rounding {
             Rounding::Down => lower_bound = lambda,
@@ -361,12 +366,12 @@ async fn compute_interval(
 }
 
 async fn check_point(
-    tight: SimResult, alpha: f64, beta: f64, chernoff_error: f64, target_width: f64
+    tight: SimResult, alpha: f64, beta: f64, chernoff_error: f64, target_width: f64, samp_scale: f64
 ) -> bool {
     let point = (tight.upper_bound + tight.lower_bound) / 2.0;
     let mut success = true;
     for rounding in [Rounding::Down, Rounding::Up] {
-        let params = compute_params(alpha, beta, chernoff_error, target_width, rounding);
+        let params = compute_params(alpha, beta, chernoff_error, target_width, samp_scale, rounding);
         let lambda = match rounding {
             Rounding::Down => point - 0.25 * target_width,
             Rounding::Up => point + 0.75 * target_width
@@ -382,14 +387,13 @@ async fn check_point(
 }
 
 fn compute_params(
-    alpha: f64, beta: f64, chernoff_error: f64, target_width: f64, rounding: Rounding
+    alpha: f64, beta: f64, chernoff_error: f64, target_width: f64, samp_scale: f64, rounding: Rounding
 ) -> Parameters {
     if alpha > 0.29 { panic!("alpha too large"); }
-    if chernoff_error != 1.0 { panic!("fooflate not supported"); }
     let round_coin_map = [
-        (0.02, 3, 4), (0.05, 4, 4), (0.08, 5, 4), (0.10, 6, 4), (0.12, 6, 5),
-        (0.15, 7, 5), (0.17, 8, 5), (0.2, 9, 6), (0.23, 10, 6), (0.25, 11, 7),
-        (0.26, 12, 8), (0.27, 13, 8), (0.28, 14, 8), (0.29, 15, 8)
+        (0.02, 4, 5), (0.05, 5, 5), (0.08, 6, 6), (0.10, 6, 6), (0.12, 7, 6),
+        (0.15, 8, 7), (0.17, 9, 7), (0.2, 10, 8), (0.23, 12, 9), (0.25, 13, 9),
+        (0.26, 14, 9), (0.27, 16, 9), (0.28, 17, 9), (0.29, 18, 9)
     ];
     let mut i = 0;
     let (adv_coins, round_depth) = loop {
@@ -398,14 +402,16 @@ fn compute_params(
         }
         i += 1;
     };
+    // baseline: 3 -> 4x
+    let foo_size = (1.0 / chernoff_error).ln().sqrt();
+    let round_loss = (round_depth as f64 / 4.0).sqrt();
+    let from_baseline = target_width / (0.005 * round_loss * (1.0 + foo_size).sqrt());
     let (epsilon, eta, samples_drawn) = if beta == 0.0 || beta == 1.0 {
-        let from_baseline = target_width / 0.005;
         // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.002
-        (0.00001 * from_baseline, 0.0, (500_000 as f64 / (from_baseline * from_baseline)).ceil() as usize)
+        (0.000001 * from_baseline * from_baseline, 0.0, (samp_scale * 500_000.0 / (from_baseline * from_baseline)).ceil() as usize)
     } else {
-        let from_baseline = target_width / 0.005;
         // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.005
-        (0.001 * from_baseline, 0.0001 * from_baseline, (500_000 as f64 / (from_baseline * from_baseline)).ceil() as usize)
+        (0.001 * from_baseline, 0.0001 * from_baseline, (samp_scale * 500_000.0 / (from_baseline * from_baseline)).ceil() as usize)
     };
     Parameters {
         adv_coins,
@@ -418,7 +424,7 @@ fn compute_params(
         parallelism_factor: 100,
         round_depth,
         chernoff_error,
-        flate_group: 30
+        flate_group: 20
     }
 }
 
@@ -428,7 +434,8 @@ static HELP_MSG : &str =
 \tfixed-value: value of fixed parameter
 \tstep-size: step size of other parameter
 \ttarget-width: desired output interval width
-\tchernoff-error: upper bound on fooflate error probability each round";
+\tchernoff-error: upper bound on fooflate error probability each round
+\tsamp-scale?: optional parameter to scale number of samples taken";
 
 #[tokio::main]
 async fn main() {
@@ -445,7 +452,7 @@ async fn main() {
     // this is at most r/sigmasqrt(n)
     // again if bound sigma can get smth like 4/sqrt(n)
     let args: Vec<String> = env::args().collect();
-    if args.len() != 6 {
+    if args.len() != 6 && args.len() != 7 {
         panic!("{}", HELP_MSG);
     }
     let (alpha_vals, beta_vals) = {
@@ -476,6 +483,7 @@ async fn main() {
     };
     let target_width: f64 = args[4].parse().expect(HELP_MSG);
     let chernoff_error = args[5].parse().expect(HELP_MSG);
+    let samp_scale = if args.len() == 6 { 1.0 } else { args[6].parse().expect(HELP_MSG) };
     let start = Instant::now();
     let mut ctr = 1;
     let num = alpha_vals.len() * beta_vals.len();
@@ -488,7 +496,7 @@ async fn main() {
     for alpha in alpha_vals {
         for beta in &beta_vals {
             println!("Running simulation {:?} of {:?}.", ctr, num);
-            let interval = compute_interval(alpha, *beta, chernoff_error, target_width).await;
+            let interval = compute_interval(alpha, *beta, chernoff_error, target_width, samp_scale).await;
             println!("{:?}", interval);
             results.write_all(
                 &format!(
