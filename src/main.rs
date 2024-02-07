@@ -365,23 +365,28 @@ async fn compute_interval(
     res
 }
 
-async fn check_point(
-    tight: SimResult, alpha: f64, beta: f64, chernoff_error: f64, target_width: f64, samp_scale: f64
-) -> bool {
+fn check_vals(tight: SimResult, target_width: f64) -> (f64, f64) {
     let point = (tight.upper_bound + tight.lower_bound) / 2.0;
+    (point - 0.28 * target_width, point + 0.72 * target_width)
+}
+
+async fn check_point(
+    lo: f64, hi: f64, alpha: f64, beta: f64, chernoff_error: f64, target_width: f64, samp_scale: f64
+) -> bool {
+    println!("checking {:?} to {:?}", lo, hi);
     let mut success = true;
     for rounding in [Rounding::Down, Rounding::Up] {
         let params = compute_params(alpha, beta, chernoff_error, target_width, samp_scale, rounding);
         let lambda = match rounding {
-            Rounding::Down => point - 0.25 * target_width,
-            Rounding::Up => point + 0.75 * target_width
+            Rounding::Down => lo,
+            Rounding::Up => hi
         };
         let reward = simulate(&params, lambda).await;
         match rounding {
             Rounding::Down => if reward < 0.0 { success = false; },
             Rounding::Up => if reward > 0.0 { success = false; },
         }
-        // println!("reward {:?} params {:?}", reward, params);
+        println!("reward on {:?} is {:?}", lambda, reward);
     }
     success
 }
@@ -406,13 +411,18 @@ fn compute_params(
     let foo_size = (1.0 / chernoff_error).ln().sqrt();
     let round_loss = (round_depth as f64 / 4.0).sqrt();
     let from_baseline = target_width / (0.005 * round_loss * (1.0 + foo_size).sqrt());
-    let (epsilon, eta, samples_drawn) = if beta == 0.0 || beta == 1.0 {
+    let (epsilon, eta) = if beta == 0.0 || beta == 1.0 {
         // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.002
-        (0.000001 * from_baseline * from_baseline, 0.0, (samp_scale * 500_000.0 / (from_baseline * from_baseline)).ceil() as usize)
+        (0.000001 * from_baseline * from_baseline, 0.0)
     } else {
         // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.005
-        (0.001 * from_baseline, 0.0001 * from_baseline, (samp_scale * 500_000.0 / (from_baseline * from_baseline)).ceil() as usize)
+        (0.001 * from_baseline, 0.0001 * from_baseline)
     };
+    let samples_drawn = if chernoff_error == 1.0 {
+        (2.0 / target_width * target_width).ceil() as usize
+    } else {
+        samp_scale * 1_000_000.0 / (from_baseline * from_baseline).ceil() as usize
+    }
     Parameters {
         adv_coins,
         epsilon,
@@ -455,6 +465,16 @@ async fn main() {
     if args.len() != 6 && args.len() != 7 {
         panic!("{}", HELP_MSG);
     }
+    let target_width: f64 = args[4].parse().expect(HELP_MSG);
+    let chernoff_error = args[5].parse().expect(HELP_MSG);
+    let samp_scale = if args.len() == 6 { 1.0 } else { args[6].parse().expect(HELP_MSG) };
+    let mut results = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open("results.txt")
+        .unwrap();
+    let start = Instant::now();
     let (alpha_vals, beta_vals) = {
         let val: f64 = args[2].parse().expect(HELP_MSG);
         let step: f64 = args[3].parse().expect(HELP_MSG);
@@ -477,22 +497,37 @@ async fn main() {
                     vec.push(val);
                 }
                 (vec, Vec::from([val]))
+            },
+            "pair" => {
+                let (alpha, beta) = (val, step);
+                let interval = compute_interval(alpha, beta, 1.0, target_width, samp_scale).await;
+                println!("Unflated guess computed!", start.elapsed());
+                println!("Elapsed time was {:?}", start.elapsed());
+                let (lo, hi) = check_vals(interval, target_width);
+                let success = check_point(lo, hi, alpha, beta, chernoff_error, target_width, samp_scale).await;
+                if success {
+                    results.write_all(
+                        &format!(
+                            "{:?}, {:?}, {:?}, {:?}, {:?}\n", 
+                            alpha, 
+                            beta, 
+                            chernoff_error,
+                            lo,
+                            hi
+                        ).into_bytes()
+                    ).unwrap();
+                    println!("Check success!");
+                    println!("Runtime was {:?}", start.elapsed());
+                } else {
+                    println!("fail!");
+                }
+                return;
             }
             _ => { panic!("{}", HELP_MSG); }
         }
     };
-    let target_width: f64 = args[4].parse().expect(HELP_MSG);
-    let chernoff_error = args[5].parse().expect(HELP_MSG);
-    let samp_scale = if args.len() == 6 { 1.0 } else { args[6].parse().expect(HELP_MSG) };
-    let start = Instant::now();
     let mut ctr = 1;
     let num = alpha_vals.len() * beta_vals.len();
-    let mut results = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .create(true)
-        .open("results.txt")
-        .unwrap();
     for alpha in alpha_vals {
         for beta in &beta_vals {
             println!("Running simulation {:?} of {:?}.", ctr, num);
