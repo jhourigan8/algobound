@@ -366,7 +366,7 @@ async fn compute_interval(
 }
 
 fn check_vals(point: f64, target_width: f64) -> (f64, f64) {
-    (point - 0.28 * target_width, point + 0.72 * target_width)
+    (point - 0.25 * target_width, point + 0.75 * target_width)
 }
 
 async fn check_point(
@@ -418,10 +418,10 @@ fn compute_params(
         (0.001 * from_baseline, 0.0001 * from_baseline)
     };
     let samples_drawn = if chernoff_error == 1.0 {
-        (25.0 * 4.0 * 0.125 / target_width * target_width).ceil() as usize
+        (25.0 * 4.0 * 0.125 / (target_width * target_width)).ceil() as usize
     } else {
-        samp_scale * 1_000_000.0 / (from_baseline * from_baseline).ceil() as usize
-    }
+        (samp_scale * 1_200_000.0 / (from_baseline * from_baseline)).ceil() as usize
+    };
     Parameters {
         adv_coins,
         epsilon,
@@ -499,15 +499,15 @@ async fn main() {
             "pair" => {
                 let (alpha, beta) = (val, step);
                 let point_est = if args.len() == 6 { 
-                    let interval = compute_interval(alpha, beta, 1.0, target_width, samp_scale).await;
-                    println!("Unflated guess computed!", start.elapsed());
+                    let interval = compute_interval(alpha, beta, 1.0, target_width, 1.0).await;
+                    println!("Unflated guess computed {:?}!", start.elapsed());
                     println!("Elapsed time was {:?}", start.elapsed());
                     (interval.upper_bound + interval.lower_bound) / 2.0
                 } else { 
                     args[6].parse().expect(HELP_MSG) 
                 };
-                let (lo, hi) = check_vals(point, target_width);
-                let success = check_point(lo, hi, alpha, beta, chernoff_error, target_width, samp_scale).await;
+                let (lo, hi) = check_vals(point_est, target_width);
+                let success = check_point(lo, hi, alpha, beta, chernoff_error, target_width, 1.0).await;
                 if success {
                     results.write_all(
                         &format!(
