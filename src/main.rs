@@ -418,7 +418,7 @@ fn compute_params(
         (0.001 * from_baseline, 0.0001 * from_baseline)
     };
     let samples_drawn = if chernoff_error == 1.0 {
-        (25.0 * 4.0 * 0.125 / (target_width * target_width)).ceil() as usize
+        (49.0 * 0.125 / (target_width * target_width)).ceil() as usize
     } else {
         (samp_scale * 1_200_000.0 / (from_baseline * from_baseline)).ceil() as usize
     };
