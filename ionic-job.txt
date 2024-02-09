@@ -1,0 +1,19 @@
+#!/bin/bash
+#
+#***
+#*** "#SBATCH" lines must come before any non-blank, non-comment lines ***
+#***
+#
+# 1 node, 1 CPU per node (total 1 CPU), wall clock time of 30 hours
+#
+#SBATCH -N 1                  ## Node count
+#SBATCH --ntasks-per-node=1   ## Processors per node
+#SBATCH -t 30:00:00           ## Walltime
+#
+# send mail if the process fails
+#SBATCH --mail-type=fail
+# Remember to set your email address here instead of nobody
+#SBATCH --mail-user=nobody@cs.princeton.edu
+#
+
+srun ./run
