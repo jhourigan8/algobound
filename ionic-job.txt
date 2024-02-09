@@ -13,7 +13,7 @@
 # send mail if the process fails
 #SBATCH --mail-type=fail
 # Remember to set your email address here instead of nobody
-#SBATCH --mail-user=nobody@cs.princeton.edu
+#SBATCH --mail-user=hojack@seas.upenn.edu
 #
 
 srun ./run
