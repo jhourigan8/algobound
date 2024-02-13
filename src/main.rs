@@ -4,6 +4,7 @@ use std::env;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rand::Rng;
+use rayon::prelude::*;
 use core::array;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -268,7 +269,7 @@ async fn fooflate(new_samps: &mut Samples, params: &Parameters, lambda: f64) {
     let shift_percent = ((1.0 / params.chernoff_error).ln() / (2 * params.samples_drawn) as f64).sqrt() as f64;
     // println!("shift pct {:?}", shift_percent);
     let num_shift = (shift_percent * params.samples_drawn as f64).ceil() as usize;
-    new_samps.data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    new_samps.data.par_sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     match params.rounding {
         Rounding::Up => {
             // println!("shifty {:?}", num_shift);
@@ -366,7 +367,7 @@ async fn compute_interval(
 }
 
 fn check_vals(point: f64, target_width: f64) -> (f64, f64) {
-    (point - 0.25 * target_width, point + 0.75 * target_width)
+    (point - 0.39 * target_width, point + 0.61 * target_width)
 }
 
 async fn check_point(
@@ -415,12 +416,12 @@ fn compute_params(
         (0.000001 * from_baseline * from_baseline, 0.0)
     } else {
         // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.005
-        (0.001 * from_baseline, 0.0001 * from_baseline)
+        (0.0005 * from_baseline, 0.00005 * from_baseline)
     };
     let samples_drawn = if chernoff_error == 1.0 {
         (49.0 * 0.125 / (target_width * target_width)).ceil() as usize
     } else {
-        (samp_scale * 1_200_000.0 / (from_baseline * from_baseline)).ceil() as usize
+        (samp_scale * 2_000_000.0 / (from_baseline * from_baseline)).ceil() as usize
     };
     Parameters {
         adv_coins,

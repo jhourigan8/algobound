@@ -7,4 +7,5 @@ edition = "2021"
 
 [dependencies]
 rand = { version = "0.8.5", features = ["small_rng"] }
+rayon = "1.8.1"
 tokio = { version = "1.32.0", features = ["rt", "macros", "rt-multi-thread"] }
