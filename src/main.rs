@@ -127,7 +127,7 @@ enum Precomp {
     /// Data needed if `BETA == 1`.
     Short(Cdf, Emax),
     /// Data needed if `0 < BETA < 1`.
-    Long(Cdf, Table)
+    Long(Cdf, Emax)
 }
 
 /// Given precomputed data `precomp` sample a single new adversary reward.
@@ -152,14 +152,47 @@ fn sample(
             }
             cum - lambda
         },
-        Precomp::Long(cdf, table) => {
+        Precomp::Long(cdf, emax) => {
             let adv = draw_adv(&cdf, adv_coins, alpha, rng);
-            let mut cum = 0f64;
+            let mut cum = 0f64; 
             let opposite = &!rounding.clone();
             for i_star in 1..=adv_coins {
                 let best = adv.best_from(i_star, alpha, beta);
-                cum += table.get(AdvDraw::beat_seen_honest_prob(adv.coins[i_star + 1], alpha, beta), best, &!rounding, &rounding);
-                cum -= table.get(AdvDraw::beat_seen_honest_prob(adv.coins[i_star], alpha, beta), best, &rounding, &rounding);
+
+                let win_old = AdvDraw::beat_seen_honest_prob(adv.coins[i_star], alpha, beta);
+                let win_new = AdvDraw::beat_seen_honest_prob(adv.coins[i_star + 1], alpha, beta);
+
+                // bigger theta => smaller inside => bigger result (more dist carry)
+                let theta_old = win_old.powf((1.0 - beta) / beta);
+                let theta_new = win_new.powf((1.0 - beta) / beta);
+                let theta_max = theta_old.max(theta_new);
+                let theta_min = theta_old.min(theta_new);
+
+                // heuristic: linear loss gap
+                // so try to uniform dot the thetas
+                // 1x: 
+                // 100x: 0.2538081466053813 to 0.2566943525664075, 20.467504791s
+                let loss_heuristic = (theta_max - theta_min) * (win_old - win_new);
+                let num_steps = (100.0 * loss_heuristic).ceil();
+                let theta_step = (theta_max - theta_min) / num_steps;
+                let init_step = match &rounding {
+                    Rounding::Down => 0.0,
+                    Rounding::Up => 1.0
+                };
+                let mut sum = 0.0;
+                for i in 0..(num_steps as usize) {
+                    let theta = theta_min + (i as f64 + init_step) * theta_step;
+                    let integrand = if theta != 0.0 {
+                        theta * emax.get(best / theta, &rounding)
+                    } else {
+                        best
+                    };
+                    sum += integrand;
+                }
+                sum /= num_steps;
+                let bound_diff = (win_old - win_new) * sum;
+                let diff = bound_diff;
+                cum += diff;
             }
             cum - lambda
         }
@@ -189,9 +222,7 @@ async fn precompute(
     if beta == 1.0 {
         return Precomp::Short(adv_cdf, emax);
     }
-    // 1e: compute G(gamma, c)
-    let table = emax.to_table(eta, beta, rounding).await;
-    Precomp::Long(adv_cdf, table)
+    Precomp::Long(adv_cdf, emax)
 }
 
 /// A struct to carry around needed parameters.
@@ -222,6 +253,7 @@ struct Parameters {
     /// Upper bound on the probability that a single `inflate` / `deflate` 
     /// procedure fails to produce a stochastic upper / lower bound.
     chernoff_error: f64,
+    /// TODO
     flate_group: usize
 }
 
@@ -311,7 +343,7 @@ async fn simulate(params: &Parameters, lambda: f64) -> f64 {
 
 /// Search for the value of `lambda` which yields zero expected adversary reward.
 async fn search(params: &Parameters) -> f64 {
-    let target = 0.5 / (params.samples_drawn as f64).sqrt();
+    let target = 0.25 / (params.samples_drawn as f64).sqrt();
     let mut lo = params.alpha;
     let mut lo_reward = simulate(&params, lo).await;
     let mut hi = params.alpha + params.alpha * params.alpha; // empirically always an upper bound
@@ -327,8 +359,8 @@ async fn search(params: &Parameters) -> f64 {
         let reward = simulate(&params, lambda).await;
         // println!("lambda = {:?}, reward = {:?}, time = {:?}", lambda, reward, SystemTime::now());
         match params.rounding {
-            Rounding::Down => if reward > 0.0 && reward < 2.0 * target { return lambda; },
-            Rounding::Up => if reward < 0.0 && reward > -2.0 * target { return lambda; }
+            Rounding::Down => if reward > 0.0 && reward < 2.0 * target { println!("EXTRA {:?}", reward); return lambda; },
+            Rounding::Up => if reward < 0.0 && reward > -2.0 * target { println!("EXTRA {:?}", -reward); return lambda; }
         }
         if reward > 0.0 {
             lo = lambda;
@@ -392,7 +424,7 @@ async fn check_point(
 }
 
 fn compute_params(
-    alpha: f64, beta: f64, chernoff_error: f64, target_width: f64, samp_scale: f64, rounding: Rounding
+    alpha: f64, beta: f64, chernoff_error: f64, mut target_width: f64, samp_scale: f64, rounding: Rounding
 ) -> Parameters {
     if alpha > 0.29 { panic!("alpha too large"); }
     let round_coin_map = [
@@ -407,23 +439,13 @@ fn compute_params(
         }
         i += 1;
     };
-    // baseline: 3 -> 4x
     let foo_size = (1.0 / chernoff_error).ln().sqrt();
-    let round_loss = (round_depth as f64 / 4.0).sqrt();
-    let from_baseline = target_width / (0.005 * round_loss * (1.0 + foo_size).sqrt());
-    let (epsilon, eta) = if beta == 0.0 || beta == 1.0 {
-        // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.002
-        (0.000001 * from_baseline * from_baseline, 0.0)
-    } else {
-        // baseline: 0.0000001, 0.0, 1.0, 7, 10, 500_000, 20, 100 gives 0.005
-        (0.0005 * from_baseline, 0.00005 * from_baseline)
-    };
-    let samples_drawn = if chernoff_error == 1.0 {
-        (49.0 * 0.125 / (target_width * target_width)).ceil() as usize
-    } else {
-        (samp_scale * 2_000_000.0 / (from_baseline * from_baseline)).ceil() as usize
-    };
-    Parameters {
+    if chernoff_error != 1.0 { 
+        target_width /= 1.0 + 0.3 * foo_size * (round_depth as f64);
+    }
+    let (epsilon, eta) = (0.02 * target_width * target_width, 0.0);
+    let samples_drawn = (50.0 * 0.125 / (target_width * target_width)).ceil() as usize;
+    let p = Parameters {
         adv_coins,
         epsilon,
         eta,
@@ -435,7 +457,9 @@ fn compute_params(
         round_depth,
         chernoff_error,
         flate_group: 20
-    }
+    };
+    println!("{:?}", p);
+    p
 }
 
 static HELP_MSG : &str =
@@ -502,6 +526,7 @@ async fn main() {
                 let point_est = if args.len() == 6 { 
                     let interval = compute_interval(alpha, beta, 1.0, target_width, 1.0).await;
                     println!("Unflated guess computed {:?}!", start.elapsed());
+                    println!("Unflated guess was {:?} to {:?}", interval.lower_bound, interval.upper_bound);
                     println!("Elapsed time was {:?}", start.elapsed());
                     (interval.upper_bound + interval.lower_bound) / 2.0
                 } else { 
