@@ -418,6 +418,18 @@ async fn check_point(
             Rounding::Down => if reward < 0.0 { success = false; },
             Rounding::Up => if reward > 0.0 { success = false; },
         }
+        let mut bounds = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open("bounds.txt")
+            .unwrap();
+        bounds.write_all(
+            &format!(
+                "reward on {:?} is {:?} round {:?}\n", lambda, reward, rounding
+            ).into_bytes()
+        ).unwrap();
+        bounds.flush().unwrap();
         println!("reward on {:?} is {:?}", lambda, reward);
     }
     success
